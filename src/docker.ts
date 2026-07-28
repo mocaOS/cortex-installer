@@ -29,12 +29,15 @@ export function parseHealth(psJson: string): ServiceStatus[] {
 
   const rows: any[] = [];
   if (text.startsWith("[")) {
-    try { rows.push(...JSON.parse(text)); } catch { /* fall through */ }
-  } else {
+    try { rows.push(...JSON.parse(text)); } catch { /* fall through to line-by-line */ }
+  }
+
+  // If array parse failed or input is not JSON array, try per-line parsing.
+  if (rows.length === 0) {
     for (const line of text.split("\n")) {
       const t = line.trim();
       if (!t) continue;
-      try { rows.push(JSON.parse(t)); } catch { /* skip */ }
+      try { rows.push(JSON.parse(t)); } catch { /* skip unparseable line */ }
     }
   }
 
@@ -45,11 +48,12 @@ export function parseHealth(psJson: string): ServiceStatus[] {
   }));
 }
 
-async function run(dir: string, args: string[]): Promise<string> {
-  const { stdout, stderr } = await exec("docker", [...composeArgs(dir), ...args], {
+async function run(dir: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+  // docker compose ps writes to stderr even on success (e.g. "variable is not set" warnings).
+  // Return them separately so parseHealth can ignore stderr chatter.
+  return exec("docker", [...composeArgs(dir), ...args], {
     maxBuffer: 32 * 1024 * 1024,
   });
-  return `${stdout}${stderr}`;
 }
 
 /** Streams pull progress; onProgress fires once per service transition. */
@@ -83,11 +87,14 @@ export async function down(dir: string, volumes = false): Promise<void> {
 }
 
 export async function ps(dir: string): Promise<ServiceStatus[]> {
-  return parseHealth(await run(dir, ["ps", "--format", "json"]));
+  const result = await run(dir, ["ps", "--format", "json"]);
+  return parseHealth(result.stdout);
 }
 
 export async function execIn(dir: string, service: string, cmd: string[]): Promise<string> {
-  return run(dir, ["exec", "-T", service, ...cmd]);
+  const result = await run(dir, ["exec", "-T", service, ...cmd]);
+  // Callers show this output to humans, so include both stdout and stderr.
+  return `${result.stdout}${result.stderr}`;
 }
 
 /** Attaches `docker compose logs -f` to this process's stdio. */
@@ -121,6 +128,12 @@ export async function waitHealthy(
       return s.state === "running";
     });
     if (ready) return true;
+    // Fail fast if any requested service is permanently down (not just starting).
+    const dead = services.some((name) => {
+      const s = status.find((x) => x.service === name);
+      return s && (s.state === "exited" || s.state === "dead");
+    });
+    if (dead) return false;
     if (Date.now() > deadline) return false;
     await new Promise((r) => setTimeout(r, 3000));
   }

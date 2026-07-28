@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { composeArgs, parsePullProgress, parseHealth } from "../src/docker.js";
+import { composeArgs, parsePullProgress, parseHealth, ServiceStatus } from "../src/docker.js";
 
 test("composeArgs pins the project directory so cwd does not matter", () => {
   const a = composeArgs("/opt/cortex");
@@ -45,4 +45,20 @@ test("parseHealth handles a single JSON array instead of lines", () => {
 
 test("parseHealth returns an empty list for empty input", () => {
   assert.deepEqual(parseHealth(""), []);
+});
+
+test("parseHealth falls through to per-line parsing when array parse fails", () => {
+  // Simulates broken array syntax followed by valid NDJSON and stderr chatter.
+  const malformed = `[{corrupted\n${JSON.stringify({ Service: "neo4j", State: "running", Health: "healthy" })}\nno configuration file provided: not found`;
+  assert.deepEqual(parseHealth(malformed), [
+    { service: "neo4j", state: "running", health: "healthy" },
+  ]);
+});
+
+test("parseHealth degrades gracefully when NDJSON is followed by stderr", () => {
+  // Simulates docker compose ps output: NDJSON followed by stderr warning.
+  const ndjsonWithStderr = `${JSON.stringify({ Service: "chat", State: "running", Health: "" })}\nvariable is not set`;
+  assert.deepEqual(parseHealth(ndjsonWithStderr), [
+    { service: "chat", state: "running", health: null },
+  ]);
 });
