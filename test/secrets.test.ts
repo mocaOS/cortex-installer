@@ -35,8 +35,14 @@ test("generated secrets are never members of the weak set", () => {
   }
 });
 
-test("generated secrets differ between calls", () => {
-  assert.notEqual(generateSecrets().neo4jPassword, generateSecrets().neo4jPassword);
+test("every generated secret differs between calls", () => {
+  // All five, not just one: a refactor that accidentally reused a single
+  // randomBytes call for two fields would otherwise leave the suite green.
+  const a = generateSecrets();
+  const b = generateSecrets();
+  for (const k of Object.keys(a) as Array<keyof typeof a>) {
+    assert.notEqual(a[k], b[k], `${k} repeated across calls`);
+  }
 });
 
 test("every generated secret passes its own validator", () => {

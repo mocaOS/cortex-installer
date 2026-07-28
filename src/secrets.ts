@@ -40,7 +40,7 @@ export function generateSecrets(): GeneratedSecrets {
     // base64url of 32 bytes, stripped to an alnum-safe subset: Compose
     // interpolates `$` inside .env values, so avoid it entirely.
     neo4jPassword: randomBytes(32).toString("base64url").replace(/[^A-Za-z0-9]/g, "").slice(0, 40),
-    // 4 groups of 4 — transcribable over the phone, ~82 bits.
+    // 4 groups of 4 from a 57-symbol alphabet — transcribable over the phone, ~93 bits.
     adminPassword: [0, 1, 2, 3].map(() => readableGroup(4)).join("-"),
     adminApiKey: `cortex_admin_${randomBytes(32).toString("hex")}`,
     sessionSecret: randomBytes(48).toString("hex"),
@@ -64,13 +64,12 @@ export function validateSecret(kind: keyof GeneratedSecrets, value: string): str
     return "must be at least 32 characters";
   }
   if (kind === "chatEncryptionKey") {
-    let bytes: number;
-    try {
-      bytes = Buffer.from(value, "base64").length;
-    } catch {
-      return "must be base64";
+    // Buffer.from(..., "base64") never throws — it decodes leniently — so a
+    // length check is the only meaningful validation, and a try/catch here
+    // would be dead code implying a failure mode that cannot occur.
+    if (Buffer.from(value, "base64").length !== 32) {
+      return "must be exactly 32 bytes, base64 encoded (openssl rand -base64 32)";
     }
-    if (bytes !== 32) return "must be exactly 32 bytes, base64 encoded (openssl rand -base64 32)";
   }
   return null;
 }
