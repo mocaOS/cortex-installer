@@ -17,6 +17,7 @@ export interface PreflightReport {
   checks: Check[];
 }
 
+const MIN_NODE = "20.12.0"; // set by @clack/prompts + @clack/core
 const MIN_COMPOSE = "2.20.0";
 const MIN_DISK_GB = 20;
 const HARD_DISK_GB = 10;
@@ -52,20 +53,21 @@ export function checkPort(port: number, host = "127.0.0.1"): Promise<boolean> {
   });
 }
 
-async function tryExec(cmd: string, args: string[]): Promise<string> {
+async function tryExec(cmd: string, args: string[]): Promise<{ output: string; notFound: boolean }> {
   try {
     const { stdout, stderr } = await exec(cmd, args);
-    return `${stdout}${stderr}`;
+    return { output: `${stdout}${stderr}`, notFound: false };
   } catch (err: any) {
-    return `${err?.stdout ?? ""}${err?.stderr ?? err?.message ?? ""}`;
+    const notFound = err?.code === "ENOENT";
+    return { output: `${err?.stdout ?? ""}${err?.stderr ?? ""}`, notFound };
   }
 }
 
 /** Parses `docker info --format {{json .}}` for MemTotal and DockerRootDir. */
 async function dockerInfo(): Promise<{ memGb: number | null; rootDir: string | null }> {
-  const out = await tryExec("docker", ["info", "--format", "{{json .}}"]);
+  const { output } = await tryExec("docker", ["info", "--format", "{{json .}}"]);
   try {
-    const j = JSON.parse(out);
+    const j = JSON.parse(output);
     return {
       memGb: typeof j.MemTotal === "number" ? j.MemTotal / 1024 ** 3 : null,
       rootDir: typeof j.DockerRootDir === "string" ? j.DockerRootDir : null,
@@ -76,8 +78,8 @@ async function dockerInfo(): Promise<{ memGb: number | null; rootDir: string | n
 }
 
 async function freeDiskGb(path: string): Promise<number | null> {
-  const out = await tryExec("df", ["-Pk", path]);
-  const line = out.trim().split("\n").at(-1) ?? "";
+  const { output } = await tryExec("df", ["-Pk", path]);
+  const line = output.trim().split("\n").at(-1) ?? "";
   const cols = line.split(/\s+/);
   const availKb = Number(cols[3]);
   return Number.isFinite(availKb) ? availKb / 1024 ** 2 : null;
@@ -90,25 +92,28 @@ export async function runPreflight(opts: {
   const checks: Check[] = [];
 
   // Node
-  const nodeOk = semver.gte(process.versions.node, "18.0.0");
+  const nodeOk = semver.gte(process.versions.node, MIN_NODE);
   checks.push({
     name: "Node",
     ok: nodeOk,
-    detail: nodeOk ? `v${process.versions.node}` : `v${process.versions.node} — need >= 18`,
+    detail: nodeOk ? `v${process.versions.node}` : `v${process.versions.node} — need >= ${MIN_NODE}`,
     fatal: true,
   });
 
   // Docker daemon
-  const dv = parseDockerVersion(await tryExec("docker", ["version", "--format", "{{.Server.Version}}"]));
+  const dvResult = await tryExec("docker", ["version", "--format", "{{.Server.Version}}"]);
+  const dv = parseDockerVersion(dvResult.output);
   checks.push({
     name: "Docker daemon",
     ok: dv !== null,
-    detail: dv ? `${dv}` : "not reachable — is Docker running?",
+    detail:
+      dv ? `${dv}` : dvResult.notFound ? "docker: command not found — install Docker first" : "not reachable — is Docker running?",
     fatal: true,
   });
 
   // Compose v2 plugin
-  const cv = parseComposeVersion(await tryExec("docker", ["compose", "version"]));
+  const cvResult = await tryExec("docker", ["compose", "version"]);
+  const cv = parseComposeVersion(cvResult.output);
   const cvOk = cv !== null && semver.gte(cv, MIN_COMPOSE);
   checks.push({
     name: "Compose v2",
@@ -135,25 +140,25 @@ export async function runPreflight(opts: {
   // Disk + RAM
   const info = await dockerInfo();
   const disk = info.rootDir ? await freeDiskGb(info.rootDir) : null;
-  if (disk !== null) {
-    checks.push({
-      name: "Disk",
-      ok: disk >= HARD_DISK_GB,
-      detail:
-        disk >= MIN_DISK_GB
-          ? `${disk.toFixed(0)} GB free`
-          : `${disk.toFixed(0)} GB free — ${MIN_DISK_GB} GB recommended`,
-      fatal: disk < HARD_DISK_GB,
-    });
-  }
+  checks.push({
+    name: "Disk",
+    ok: disk !== null && disk >= HARD_DISK_GB,
+    detail:
+      disk === null
+        ? "could not determine free disk space — verify manually that at least 20 GB is free"
+        : disk >= MIN_DISK_GB
+          ? `${Math.floor(disk)} GB free`
+          : `${Math.floor(disk)} GB free — ${MIN_DISK_GB} GB recommended`,
+    fatal: disk !== null && disk < HARD_DISK_GB,
+  });
   if (info.memGb !== null) {
     checks.push({
       name: "Memory",
       ok: info.memGb >= MIN_RAM_GB,
       detail:
         info.memGb >= WARN_RAM_GB
-          ? `${info.memGb.toFixed(0)} GB`
-          : `${info.memGb.toFixed(0)} GB — ${WARN_RAM_GB} GB recommended (Neo4j alone is capped at 4 GB)`,
+          ? `${Math.floor(info.memGb)} GB`
+          : `${Math.floor(info.memGb)} GB — ${WARN_RAM_GB} GB recommended (Neo4j alone is capped at 4 GB)`,
       fatal: info.memGb < MIN_RAM_GB,
     });
   }
