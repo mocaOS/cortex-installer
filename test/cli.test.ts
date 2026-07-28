@@ -34,3 +34,11 @@ test("a flag before the verb still parses and the verb is still found", () => {
   assert.equal(r.verb, "update");
   assert.equal(r.flags.yes, true);
 });
+
+test("rejects an unknown verb instead of silently installing", () => {
+  assert.throws(() => parseArgs(["staus"]), /Unknown command "staus"/);
+});
+
+test("still defaults to install when no verb is given at all", () => {
+  assert.equal(parseArgs(["--yes"]).verb, "install");
+});

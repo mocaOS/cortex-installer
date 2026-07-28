@@ -38,7 +38,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
     }
   }
 
-  const verb = rest.length && VERBS.has(rest[0]) ? rest.shift()! : "install";
+  if (rest.length && !VERBS.has(rest[0])) {
+    throw new Error(
+      `Unknown command "${rest[0]}". Run \`npx @mocaos/cortex --help\` for the list.`
+    );
+  }
+  const verb = rest.length ? rest.shift()! : "install";
   return { verb, flags, positionals: rest };
 }
 
