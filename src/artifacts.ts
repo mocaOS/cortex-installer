@@ -33,12 +33,31 @@ export async function fetchArtifacts(opts: { version: string; dir: string }): Pr
     // without buffering a 6 MB body in memory.
     await exec("curl", ["-fsSL", url, "-o", tgz]);
 
+    // Discover the archive's top-level directory instead of globbing for it.
+    // GNU tar (every Linux install — the primary target) REFUSES wildcards in
+    // member names without --wildcards, which bsdtar does not accept, so a
+    // glob that works on macOS extracts nothing on Linux:
+    //   tar: Pattern matching characters used in file names
+    //   tar: mocaOS-cortex-app-*/selfhost: Not found in archive
+    // Literal paths need no wildcard support and behave identically on both.
+    //
+    // maxBuffer: the real v1.0.0 listing is ~35 KB for 581 entries — comfortably
+    // under Node's 1 MB default — but a silently-truncated listing would fail
+    // obscurely ("stdout maxBuffer exceeded") on some future, much larger
+    // release, so this is sized with generous headroom rather than left at
+    // the default.
+    const { stdout: listing } = await exec("tar", ["-tzf", tgz], { maxBuffer: 16 * 1024 * 1024 });
+    const prefix = listing.split("\n")[0]?.split("/")[0];
+    if (!prefix) {
+      throw new Error(`release v${opts.version} tarball is empty or unreadable`);
+    }
+
     await exec("tar", [
       "-xzf", tgz,
       "-C", work,
       "--strip-components=1",
-      `mocaOS-cortex-app-*/selfhost/`,
-      `mocaOS-cortex-app-*/ops/`,
+      `${prefix}/selfhost`,
+      `${prefix}/ops`,
     ]);
 
     const src = join(work, "selfhost");

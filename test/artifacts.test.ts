@@ -26,10 +26,23 @@ test("fetches every artifact the stack needs from a real release tag", async (t)
 });
 
 test("rejects a version that has no release", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "art-"));
+  // Reachability is decided independently of the assertion below. Previously
+  // assert.rejects itself was wrapped in the try/catch, so a real bug (an
+  // AssertionError from a rejection message that stopped matching
+  // /404|not found/i) and a genuine network outage were indistinguishable —
+  // both silently took the t.skip path. Checking connectivity first means a
+  // wrong message now fails the test instead of being swallowed as "offline".
+  let reachable: boolean;
   try {
-    await assert.rejects(fetchArtifacts({ version: "0.0.0-nope", dir }), /404|not found/i);
-  } catch (err) {
-    t.skip(`network unavailable: ${(err as Error).message}`);
+    const res = await fetch("https://api.github.com/", { signal: AbortSignal.timeout(10_000) });
+    reachable = res.status < 500;
+  } catch {
+    reachable = false;
   }
+  if (!reachable) {
+    return t.skip("network unavailable: could not reach api.github.com");
+  }
+
+  const dir = mkdtempSync(join(tmpdir(), "art-"));
+  await assert.rejects(fetchArtifacts({ version: "0.0.0-nope", dir }), /404|not found/i);
 });
