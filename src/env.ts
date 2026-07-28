@@ -72,6 +72,12 @@ export function renderEnv(cfg: InstallConfig): string {
     "# Local compose changes belong in docker-compose.override.yml, which",
     "# Compose merges automatically and the installer never touches.",
     "#",
+    "# NEXT_PUBLIC_API_URL is deliberately never set here, in any mode, and you",
+    "# should not add it yourself. The browser calls same-origin /api/* and the",
+    "# frontend proxies to the backend server-side; setting this var breaks",
+    "# that same-origin routing and breaks the single published frontend image",
+    "# working across every install (localhost and every domain alike).",
+    "#",
     "# Keep this file at mode 600: it holds every secret."
   );
 
@@ -144,7 +150,7 @@ export function renderEnv(cfg: InstallConfig): string {
     if (a.visionModel) put("VISION_MODEL", a.visionModel);
     if (a.enableReranking !== undefined) put("ENABLE_RERANKING", String(a.enableReranking));
     if (a.neo4jMemLimit) put("CORTEX_NEO4J_MEM_LIMIT", a.neo4jMemLimit);
-    if (a.batchConcurrency) put("BATCH_PROCESSING_CONCURRENCY", a.batchConcurrency);
+    if (a.batchConcurrency !== undefined) put("BATCH_PROCESSING_CONCURRENCY", a.batchConcurrency);
   }
 
   section("Error tracking");

@@ -69,6 +69,13 @@ test("every required variable is present and non-empty in localhost mode", () =>
   }
 });
 
+test("localhost mode omits the three domain-only vars entirely", () => {
+  const e = parse(renderEnv(base()));
+  assert.equal("APP_DOMAIN" in e, false);
+  assert.equal("CHAT_DOMAIN" in e, false);
+  assert.equal("ACME_EMAIL" in e, false);
+});
+
 test("domain mode also fills the three domain-only required vars", () => {
   const cfg = base({ mode: "domain", domains: { app: "c.example.com", chat: "ch.example.com", acmeEmail: "a@example.com" } });
   const e = parse(renderEnv(cfg));
@@ -84,7 +91,9 @@ test("NEVER writes SESSION_COOKIE_SECURE — the overlay owns it", () => {
 });
 
 test("NEVER writes NEXT_PUBLIC_API_URL", () => {
-  assert.doesNotMatch(renderEnv(base()), /NEXT_PUBLIC_API_URL/);
+  assert.equal("NEXT_PUBLIC_API_URL" in parse(renderEnv(base())), false);
+  const cfg = base({ mode: "domain", domains: { app: "a.example.com", chat: "b.example.com", acmeEmail: "c@example.com" } });
+  assert.equal("NEXT_PUBLIC_API_URL" in parse(renderEnv(cfg)), false);
 });
 
 test("error reporting is off by default — DSNs empty, chat disabled", () => {
