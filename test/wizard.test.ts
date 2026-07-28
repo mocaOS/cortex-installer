@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildConfigNonInteractive } from "../src/wizard.js";
+import { buildConfigNonInteractive, checkProjectVolumeCollision } from "../src/wizard.js";
 import { parseStack } from "../src/stack.js";
 
 const stack = parseStack({
@@ -85,4 +85,34 @@ test("rejects an unknown mode", () => {
     () => buildConfigNonInteractive({ ...MINIMAL, CORTEX_MODE: "sideways" }, stack, "/tmp/c"),
     /sideways/
   );
+});
+
+// checkProjectVolumeCollision takes an already-fetched volume listing so it
+// can be tested without depending on this machine's real Docker volumes.
+test("checkProjectVolumeCollision does nothing when there are no existing volumes", () => {
+  assert.equal(checkProjectVolumeCollision("cortex", [], false), undefined);
+});
+
+test("--yes rejects a colliding project name when CORTEX_PROJECT_NAME was not set", () => {
+  assert.throws(
+    () =>
+      checkProjectVolumeCollision(
+        "cortex",
+        ["cortex_neo4j_data", "cortex_uploads_data"],
+        false
+      ),
+    (err: unknown) => {
+      const m = (err as Error).message;
+      assert.match(m, /cortex_neo4j_data/);
+      assert.match(m, /cortex_uploads_data/);
+      assert.match(m, /CORTEX_PROJECT_NAME/);
+      return true;
+    }
+  );
+});
+
+test("an explicitly chosen CORTEX_PROJECT_NAME reusing existing data warns instead of throwing", () => {
+  const warning = checkProjectVolumeCollision("cortex", ["cortex_neo4j_data"], true);
+  assert.match(warning ?? "", /cortex/i);
+  assert.match(warning ?? "", /NEO4J_PASSWORD/);
 });

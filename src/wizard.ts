@@ -133,6 +133,47 @@ export function buildConfigNonInteractive(
   };
 }
 
+/**
+ * The --yes counterpart of the wizard's own project-name-collision loop (see
+ * the "project name" block inside runWizard). buildConfigNonInteractive is a
+ * plain synchronous function and cannot itself await the Docker call that
+ * lists volumes, so callers fetch the listing (existingProjectVolumes, in
+ * preflight.ts) and pass it in here — which also means this function is
+ * fully testable without touching this machine's real volumes.
+ *
+ * --yes cannot prompt, so unlike the wizard, a collision under a NAME THE
+ * CALLER DID NOT EXPLICITLY CHOOSE is a hard failure (aggregate-then-throw,
+ * matching the missing-required-value check above: list every colliding
+ * volume and both remedies in one message, not one at a time). A collision
+ * under an explicitly set CORTEX_PROJECT_NAME is treated as deliberate reuse
+ * instead, mirroring the wizard's own "reuse" choice — this returns a
+ * warning for the caller to display rather than throwing, since printing is
+ * install.ts's job, not this function's.
+ */
+export function checkProjectVolumeCollision(
+  projectName: string,
+  existingVolumes: string[],
+  explicit: boolean
+): string | undefined {
+  if (existingVolumes.length === 0) return undefined;
+
+  if (!explicit) {
+    throw new Error(
+      `Project name "${projectName}" already has existing data volumes on this machine:\n` +
+        existingVolumes.map((v) => `  - ${v}`).join("\n") +
+        `\nSet CORTEX_PROJECT_NAME to a different name (recommended — leaves that data ` +
+        `untouched), or remove those volumes yourself if you are certain they are not needed.`
+    );
+  }
+
+  return (
+    `Reusing project "${projectName}" and its existing data (CORTEX_PROJECT_NAME was set ` +
+    `explicitly). If Neo4j rejects the generated password, that volume already belongs to ` +
+    `different credentials: restore the ORIGINAL NEO4J_PASSWORD for this data into .env, ` +
+    `then run \`cortex restart\`.`
+  );
+}
+
 export async function runWizard(opts: { stack: Stack; dir: string }): Promise<InstallConfig> {
   const mode = (await p.select({
     message: "How will you reach Cortex?",

@@ -3,12 +3,55 @@ import { resolve, join } from "node:path";
 import { banner, noteBox, prompts as p } from "../ui.js";
 import { installerVersion } from "../version.js";
 import { fetchStack, assertInstallerSupported } from "../stack.js";
-import { runPreflight } from "../preflight.js";
+import { runPreflight, existingProjectVolumes } from "../preflight.js";
 import { fetchArtifacts } from "../artifacts.js";
 import { renderEnv } from "../env.js";
 import { writeState } from "../state.js";
 import { pull, up, waitHealthy } from "../docker.js";
-import { runWizard, buildConfigNonInteractive } from "../wizard.js";
+import { runWizard, buildConfigNonInteractive, checkProjectVolumeCollision } from "../wizard.js";
+import { probeChat, probeEmbedding } from "../validate.js";
+
+type Spinner = ReturnType<typeof p.spinner>;
+
+/**
+ * The wizard probes the chat and embedding endpoints itself, synchronously
+ * as part of building its own config (see wizard.ts) — it never returns
+ * until both pass. buildConfigNonInteractive has no equivalent: it is a
+ * plain, synchronous function that only validates presence and secret
+ * strength, so a bad --yes key or a nonexistent model previously sailed
+ * straight through to .env, a ~1.4 GB pull and a container start. This is
+ * the --yes path's missing half of "a wrong key fails in seconds" — the
+ * failure messaging is copied verbatim from the wizard's probe block so the
+ * two paths behave identically.
+ */
+async function probeLlmOrExit(
+  llm: { baseUrl: string; apiKey: string; chatModel: string; embeddingModel: string },
+  s: Spinner
+): Promise<void> {
+  s.start("Testing chat completion");
+  const chatProbe = await probeChat({ baseUrl: llm.baseUrl, apiKey: llm.apiKey, model: llm.chatModel });
+  if (!chatProbe.ok) {
+    s.stop("Chat probe failed");
+    p.log.error(
+      `${chatProbe.status ? `HTTP ${chatProbe.status}` : "Request failed"}: ${chatProbe.body ?? ""}`
+    );
+    p.cancel("The LLM endpoint did not answer. Nothing was written.");
+    process.exit(1);
+  }
+  s.stop(`Chat completion OK (${chatProbe.ms} ms)`);
+
+  s.start("Testing embeddings");
+  const embedProbe = await probeEmbedding({ baseUrl: llm.baseUrl, apiKey: llm.apiKey, model: llm.embeddingModel });
+  if (!embedProbe.ok) {
+    s.stop("Embedding probe failed");
+    p.log.error(
+      `${embedProbe.status ? `HTTP ${embedProbe.status}` : "Request failed"}: ${embedProbe.body ?? ""}`
+    );
+    p.cancel("The embedding endpoint did not answer. Nothing was written.");
+    process.exit(1);
+  }
+  s.stop(`Embeddings OK — ${embedProbe.dimension} dimensions detected`);
+}
 
 export async function run(ctx: { flags: Record<string, string | boolean> }): Promise<void> {
   const version = installerVersion();
@@ -59,6 +102,30 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
   const cfg = ctx.flags.yes
     ? buildConfigNonInteractive(process.env, stack, dir)
     : await runWizard({ stack, dir });
+
+  // --- non-interactive-only gates ------------------------------------------
+  // The wizard already satisfies both of these itself before it ever returns
+  // a config (project-name collisions and LLM probes, both in wizard.ts).
+  // buildConfigNonInteractive cannot: it is synchronous and cannot await
+  // Docker or network calls, so --yes needs an equivalent pass here — still
+  // before anything is written or pulled. Scoped to --yes only: re-running
+  // these after an interactive runWizard would just repeat checks it already
+  // made (wasting a network round trip), and for the volume check it would
+  // be outright wrong — the wizard's own "reuse" choice leaves the same
+  // collision in place on purpose, and re-checking it here with no
+  // CORTEX_PROJECT_NAME set would fail a collision the user already chose to
+  // keep.
+  if (ctx.flags.yes) {
+    const existingVolumes = await existingProjectVolumes(cfg.projectName);
+    const volumeWarning = checkProjectVolumeCollision(
+      cfg.projectName,
+      existingVolumes,
+      process.env.CORTEX_PROJECT_NAME !== undefined
+    );
+    if (volumeWarning) p.log.warn(volumeWarning);
+
+    await probeLlmOrExit(cfg.llm, s);
+  }
 
   // --- write, then start --------------------------------------------------
   mkdirSync(dir, { recursive: true });
