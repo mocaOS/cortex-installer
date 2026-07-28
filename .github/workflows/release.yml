@@ -27,6 +27,32 @@ jobs:
       - run: npm test
       - run: npm run build
 
+      # The last gate before an IRREVERSIBLE publish, and the one that matters
+      # most: v1.0.0 nearly shipped a binary that did nothing at all, because
+      # cli.ts guarded main() behind `process.argv[1].endsWith("cli.js")` and npm
+      # links a bin as a SYMLINK (node_modules/.bin/cortex -> .../dist/cli.js),
+      # so argv[1] never matched. `node dist/cli.js --version` worked throughout.
+      # Only invoking the packed tarball through the real .bin shim catches it, so
+      # that check has to run here and not just in CI.
+      - name: The packed tarball's bin must work through npm's symlink shim
+        run: |
+          set -euo pipefail
+          expected="$(node -p 'require("./package.json").version')"
+          mkdir -p /tmp/pack
+          npm pack --pack-destination /tmp/pack
+          tarball="$(ls /tmp/pack/*.tgz | head -1)"
+
+          work="$(mktemp -d)"
+          cd "$work"
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund --loglevel error "$tarball"
+
+          test -L ./node_modules/.bin/cortex
+          got="$(./node_modules/.bin/cortex --version)"
+          echo "symlink --version -> '$got' (expected '$expected')"
+          test "$got" = "$expected"
+          ./node_modules/.bin/cortex --help | grep -q 'installer and manager for self-hosted Cortex'
+
       - name: Publish to npm
         run: npm publish --access public --provenance
         env:

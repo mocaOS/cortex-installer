@@ -9,9 +9,14 @@ npx @mocaos/cortex
 
 ## What you need
 
-Docker with the **Compose v2 plugin** (`docker compose version`) — that's the
-only thing you install yourself. On Linux, `apt install docker.io` does
-**not** include Compose v2; use Docker's official packages or Docker Desktop.
+Docker with the **Compose v2 plugin** (`docker compose version`). On Linux,
+`apt install docker.io` does **not** include Compose v2; use Docker's official
+packages or Docker Desktop.
+
+Also `curl` and `tar`, which the installer uses to fetch the release artifacts.
+Both are present on macOS and on virtually every Linux desktop, but Debian's
+minimal and cloud images ship `wget` rather than `curl` — preflight checks for
+them and names whichever is missing.
 
 `npx` brings its own Node, but if you already have one on your `PATH` it must
 be **20.12 or newer** — older Node, including 18, fails the installer's first
