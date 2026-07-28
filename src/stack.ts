@@ -16,19 +16,29 @@ export interface Stack {
 const REPO = "mocaOS/cortex-app";
 const COMPONENTS = ["backend", "frontend", "chat", "neo4j", "caddy"] as const;
 
+function isNonEmptyString(val: unknown): boolean {
+  return typeof val === "string" && val.trim().length > 0;
+}
+
 export function parseStack(raw: unknown): Stack {
   if (typeof raw !== "object" || raw === null) {
     throw new Error("stack.json is not an object — the release manifest is malformed");
   }
   const o = raw as Record<string, any>;
 
-  if (typeof o.stack !== "string") throw new Error("stack.json is missing `stack`");
-  if (typeof o.minInstaller !== "string") throw new Error("stack.json is missing `minInstaller`");
+  if (!isNonEmptyString(o.stack)) throw new Error("stack.json is missing `stack`");
+  if (!isNonEmptyString(o.minInstaller)) throw new Error("stack.json is missing `minInstaller`");
+  if (!semver.valid(o.stack)) {
+    throw new Error(`stack.json has an invalid \`stack\` version: "${o.stack}"`);
+  }
+  if (!semver.valid(o.minInstaller)) {
+    throw new Error(`stack.json has an invalid \`minInstaller\` version: "${o.minInstaller}"`);
+  }
   if (typeof o.components !== "object" || o.components === null) {
     throw new Error("stack.json is missing `components`");
   }
   for (const c of COMPONENTS) {
-    if (typeof o.components[c] !== "string") {
+    if (!isNonEmptyString(o.components[c])) {
       throw new Error(`stack.json is missing components.${c}`);
     }
   }
@@ -36,8 +46,8 @@ export function parseStack(raw: unknown): Stack {
 }
 
 export function assertInstallerSupported(stack: Stack, installer: string): void {
-  // Coerce because component pins like "5.26-community" are not semver, but
-  // stack/minInstaller always are.
+  // Component pins like "5.26-community" are not semver, but stack/minInstaller
+  // are always validated as valid semver in parseStack, so direct comparison is safe.
   if (semver.lt(installer, stack.minInstaller)) {
     throw new Error(
       `Cortex ${stack.stack} needs installer >= ${stack.minInstaller}, but this is ${installer}.\n` +

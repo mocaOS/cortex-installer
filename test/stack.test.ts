@@ -90,3 +90,43 @@ test("fetchStack surfaces a non-OK response with its status", async () => {
     /503/
   );
 });
+
+test("rejects an empty string for stack version", () => {
+  const bad = structuredClone(GOOD) as Record<string, any>;
+  bad.stack = "";
+  assert.throws(() => parseStack(bad), /stack/);
+});
+
+test("rejects an empty string for minInstaller version", () => {
+  const bad = structuredClone(GOOD) as Record<string, any>;
+  bad.minInstaller = "";
+  assert.throws(() => parseStack(bad), /minInstaller/);
+});
+
+for (const key of ["backend", "frontend", "chat", "neo4j", "caddy"]) {
+  test(`rejects an empty string for components.${key}`, () => {
+    const bad = structuredClone(GOOD) as Record<string, any>;
+    bad.components[key] = "";
+    assert.throws(() => parseStack(bad), new RegExp(key));
+  });
+}
+
+test("rejects a non-semver stack version", () => {
+  const bad = structuredClone(GOOD) as Record<string, any>;
+  bad.stack = "invalid-version";
+  assert.throws(() => parseStack(bad), /invalid.*stack.*version/i);
+});
+
+test("rejects a non-semver minInstaller version with a descriptive error", () => {
+  const bad = structuredClone(GOOD) as Record<string, any>;
+  bad.minInstaller = "latest";
+  assert.throws(
+    () => parseStack(bad),
+    (err: any) => {
+      // Verify it's not a raw TypeError from semver
+      if (err instanceof TypeError) return false;
+      // Verify the error message is descriptive, not a raw library error
+      return /minInstaller/.test(err.message) && /latest/.test(err.message);
+    }
+  );
+});
