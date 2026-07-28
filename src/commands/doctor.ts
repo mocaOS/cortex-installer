@@ -33,7 +33,7 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
   // runs `doctor` at all — and an unguarded throw would discard the preflight
   // lines that already explain the problem.
   try {
-    const pre = await runPreflight({});
+    const pre = await runPreflight({ dir });
     for (const c of pre.checks) lines.push(`${c.ok ? "ok  " : "FAIL"} ${c.name}: ${c.detail}`);
   } catch {
     lines.push("warn could not run environment checks");

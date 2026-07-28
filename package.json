@@ -1,6 +1,6 @@
 {
   "name": "@mocaos/cortex",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Interactive installer for self-hosted Cortex",
   "license": "Apache-2.0",
   "author": "mocaOS",
@@ -12,11 +12,24 @@
   "bugs": {
     "url": "https://github.com/mocaOS/cortex-installer/issues"
   },
-  "keywords": ["cortex", "installer", "self-hosted", "knowledge-base", "rag", "neo4j"],
+  "keywords": [
+    "cortex",
+    "installer",
+    "self-hosted",
+    "knowledge-base",
+    "rag",
+    "neo4j"
+  ],
   "type": "module",
-  "engines": { "node": ">=20.12.0" },
-  "bin": { "cortex": "dist/cli.js" },
-  "files": ["dist"],
+  "engines": {
+    "node": ">=20.12.0"
+  },
+  "bin": {
+    "cortex": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc -p tsconfig.test.json",

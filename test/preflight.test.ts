@@ -9,6 +9,7 @@ import {
   probePort,
   runPreflight,
   filterProjectVolumes,
+  parseDfAvailGb,
 } from "../src/preflight.js";
 
 test("parses `docker version --format` output", () => {
@@ -21,6 +22,48 @@ test("parses a docker version with build metadata", () => {
 
 test("returns null for unparseable docker output", () => {
   assert.equal(parseDockerVersion("Cannot connect to the Docker daemon"), null);
+});
+
+test("parses the Available column of `df -Pk`", () => {
+  const out = [
+    "Filesystem   1024-blocks      Used Available Capacity  Mounted on",
+    "/dev/disk3s1   482797652 421670756  22007180    96%    /System/Volumes/Data",
+  ].join("\n");
+  // 22007180 KB / 1024^2 ≈ 20.98 GB
+  const gb = parseDfAvailGb(out);
+  assert.ok(gb !== null && Math.abs(gb - 20.98) < 0.05, `got ${gb}`);
+});
+
+test("parses GNU df output, whose device column wraps differently", () => {
+  const out = [
+    "Filesystem     1024-blocks     Used Available Capacity Mounted on",
+    "/dev/nvme0n1p2   982940904 41288120 891661320       5% /",
+  ].join("\n");
+  const gb = parseDfAvailGb(out);
+  assert.ok(gb !== null && gb > 800 && gb < 900, `got ${gb}`);
+});
+
+test("returns null for df's error output rather than a bogus number", () => {
+  // Docker Desktop reports DockerRootDir=/var/lib/docker, a path that exists
+  // only inside the VM. df on the host errors — this must degrade to null so
+  // the caller falls through to the next candidate path.
+  assert.equal(parseDfAvailGb("df: /var/lib/docker: No such file or directory"), null);
+  assert.equal(parseDfAvailGb(""), null);
+});
+
+test("the disk check resolves even when Docker's root dir is not a host path", async () => {
+  // Regression: the check used to measure ONLY docker info's DockerRootDir, so
+  // every Docker Desktop install (macOS/Windows — a VM-backed daemon) reported
+  // "could not determine free disk space" as a FAIL on an otherwise healthy
+  // machine. The candidate chain now falls back to host paths.
+  const r = await runPreflight({ dir: "/nonexistent-install-dir-for-test" });
+  const disk = r.checks.find((c) => c.name === "Disk");
+  assert.ok(disk, "expected a Disk check");
+  assert.ok(
+    !/could not determine/.test(disk.detail),
+    `disk check degraded to unknown: ${disk.detail}`
+  );
+  assert.match(disk.detail, /\d+ GB free/);
 });
 
 test("parses `docker compose version` output", () => {

@@ -164,7 +164,7 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
   // including domain mode, which does publish 80/443 via caddy. (An earlier
   // version of this comment claimed domain mode published no ports at all,
   // which is how both --yes and domain mode ended up with no port check.)
-  const pre = await runPreflight({});
+  const pre = await runPreflight({ dir });
   s.stop("Environment checked");
   for (const c of pre.checks) {
     const line = `${c.name}: ${c.detail}`;

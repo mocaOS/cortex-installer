@@ -136,17 +136,50 @@ async function dockerInfo(): Promise<{ memGb: number | null; rootDir: string | n
   }
 }
 
-async function freeDiskGb(path: string): Promise<number | null> {
-  const { output } = await tryExec("df", ["-Pk", path]);
+/**
+ * Parses the "Available" column of POSIX `df -Pk` output into GB. Returns null
+ * for anything that isn't a df table — notably df's own error output, which is
+ * what a non-existent path produces.
+ */
+export function parseDfAvailGb(output: string): number | null {
   const line = output.trim().split("\n").at(-1) ?? "";
   const cols = line.split(/\s+/);
   const availKb = Number(cols[3]);
   return Number.isFinite(availKb) ? availKb / 1024 ** 2 : null;
 }
 
+/**
+ * Free space at the first candidate path `df` can actually measure.
+ *
+ * Docker's own DockerRootDir is the best thing to measure when it is real: on
+ * Linux /var/lib/docker is frequently a separate, smaller partition than the
+ * install directory. But under Docker Desktop (macOS/Windows) — and any other
+ * VM-backed or remote daemon — `docker info` reports a path *inside the VM*
+ * (/var/lib/docker) that does not exist on the host, so `df` fails and the
+ * whole check degrades to "could not determine". Falling back to host paths
+ * keeps the number meaningful there, where the VM's disk image grows on the
+ * host filesystem anyway.
+ */
+async function freeDiskGb(paths: (string | null | undefined)[]): Promise<number | null> {
+  for (const path of paths) {
+    if (!path) continue;
+    const { output } = await tryExec("df", ["-Pk", path]);
+    const gb = parseDfAvailGb(output);
+    if (gb !== null) return gb;
+  }
+  return null;
+}
+
 export async function runPreflight(opts: {
   ports?: number[];
   bindAddr?: string;
+  /**
+   * Install directory, used as the disk-space fallback when Docker reports a
+   * root dir that isn't on this host (see freeDiskGb). Optional and allowed not
+   * to exist yet — a fresh install hasn't created it at preflight time, and the
+   * candidate chain falls through to the working directory.
+   */
+  dir?: string;
   /**
    * Makes a genuinely-occupied port abort instead of warn. The wizard resolves
    * conflicts interactively so it wants a warning; --yes cannot prompt, so for
@@ -177,12 +210,15 @@ export async function runPreflight(opts: {
     fatal: true,
   });
 
-  // Compose v2 plugin
+  // Compose plugin, v2 or newer. Labelled by product name rather than "Compose
+  // v2" because Compose's major has since moved past 2 — the gate is
+  // >= MIN_COMPOSE, so a v5 plugin passes, and a label reading "Compose v2:
+  // v5.1.3" only confuses whoever reads the pasted doctor output.
   const cvResult = await tryExec("docker", ["compose", "version"]);
   const cv = parseComposeVersion(cvResult.output);
   const cvOk = cv !== null && semver.gte(cv, MIN_COMPOSE);
   checks.push({
-    name: "Compose v2",
+    name: "Docker Compose",
     ok: cvOk,
     detail:
       cv === null
@@ -224,7 +260,7 @@ export async function runPreflight(opts: {
 
   // Disk + RAM
   const info = await dockerInfo();
-  const disk = info.rootDir ? await freeDiskGb(info.rootDir) : null;
+  const disk = await freeDiskGb([info.rootDir, opts.dir, process.cwd()]);
   checks.push({
     name: "Disk",
     ok: disk !== null && disk >= HARD_DISK_GB,
