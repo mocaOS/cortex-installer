@@ -1,0 +1,48 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { composeArgs, parsePullProgress, parseHealth } from "../src/docker.js";
+
+test("composeArgs pins the project directory so cwd does not matter", () => {
+  const a = composeArgs("/opt/cortex");
+  assert.deepEqual(a.slice(0, 3), ["compose", "--project-directory", "/opt/cortex"]);
+});
+
+test("parsePullProgress recognises a completed pull line", () => {
+  const r = parsePullProgress(" backend Pulled ");
+  assert.deepEqual(r, { image: "backend", done: true });
+});
+
+test("parsePullProgress recognises an in-flight pull line", () => {
+  const r = parsePullProgress(" neo4j Pulling ");
+  assert.deepEqual(r, { image: "neo4j", done: false });
+});
+
+test("parsePullProgress ignores layer chatter", () => {
+  assert.equal(parsePullProgress(" 1f2a3b4c Downloading [====>   ] 12.4MB/98MB"), null);
+});
+
+test("parsePullProgress ignores blank lines", () => {
+  assert.equal(parsePullProgress("   "), null);
+});
+
+test("parseHealth reads compose ps --format json lines", () => {
+  const json = [
+    JSON.stringify({ Service: "neo4j", State: "running", Health: "healthy" }),
+    JSON.stringify({ Service: "backend", State: "running", Health: "starting" }),
+    JSON.stringify({ Service: "frontend", State: "running", Health: "" }),
+  ].join("\n");
+  assert.deepEqual(parseHealth(json), [
+    { service: "neo4j", state: "running", health: "healthy" },
+    { service: "backend", state: "running", health: "starting" },
+    { service: "frontend", state: "running", health: null },
+  ]);
+});
+
+test("parseHealth handles a single JSON array instead of lines", () => {
+  const json = JSON.stringify([{ Service: "chat", State: "running", Health: "" }]);
+  assert.deepEqual(parseHealth(json), [{ service: "chat", state: "running", health: null }]);
+});
+
+test("parseHealth returns an empty list for empty input", () => {
+  assert.deepEqual(parseHealth(""), []);
+});
