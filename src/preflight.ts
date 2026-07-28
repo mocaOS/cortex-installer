@@ -11,6 +11,8 @@ export interface Check {
   detail: string;
   /** A failed fatal check aborts the install. */
   fatal: boolean;
+  /** Set on port checks only, so callers can filter for them without string matching. */
+  port?: number;
 }
 export interface PreflightReport {
   ok: boolean;
@@ -44,13 +46,35 @@ export function checkArch(arch: string): { ok: boolean; message?: string } {
   };
 }
 
-export function checkPort(port: number, host = "127.0.0.1"): Promise<boolean> {
+export interface PortProbe {
+  free: boolean;
+  /** errno from the failed bind: EADDRINUSE, EACCES, … */
+  code?: string;
+}
+
+/**
+ * Distinguishes "in use" from "not allowed to find out", which a boolean cannot.
+ *
+ * Binding a port below 1024 requires root on both Linux and macOS, so probing
+ * 80/443 as the ordinary user who runs the installer fails with EACCES — verified
+ * on this machine (uid 501): port 80 -> EACCES, port 3000 -> EADDRINUSE. Treating
+ * that EACCES as "in use" would abort every non-root domain-mode install on a
+ * machine where 80 is in fact free, so callers must only ever hard-fail on
+ * EADDRINUSE and downgrade everything else to "could not verify".
+ */
+export function probePort(port: number, host = "127.0.0.1"): Promise<PortProbe> {
   return new Promise((resolve) => {
     const srv = createServer();
-    srv.once("error", () => resolve(false));
-    srv.once("listening", () => srv.close(() => resolve(true)));
+    srv.once("error", (err: NodeJS.ErrnoException) =>
+      resolve({ free: false, code: err.code })
+    );
+    srv.once("listening", () => srv.close(() => resolve({ free: true })));
     srv.listen(port, host);
   });
+}
+
+export async function checkPort(port: number, host = "127.0.0.1"): Promise<boolean> {
+  return (await probePort(port, host)).free;
 }
 
 /**
@@ -123,6 +147,13 @@ async function freeDiskGb(path: string): Promise<number | null> {
 export async function runPreflight(opts: {
   ports?: number[];
   bindAddr?: string;
+  /**
+   * Makes a genuinely-occupied port abort instead of warn. The wizard resolves
+   * conflicts interactively so it wants a warning; --yes cannot prompt, so for
+   * it a taken port has to be fatal here rather than a compose bind error after
+   * a 1.7 GB pull.
+   */
+  portsFatal?: boolean;
 }): Promise<PreflightReport> {
   const checks: Check[] = [];
 
@@ -163,6 +194,25 @@ export async function runPreflight(opts: {
     fatal: true,
   });
 
+  // curl + tar — both hard requirements of fetchArtifacts (artifacts.ts), which
+  // shells out to `curl -fsSL` and then `tar -tzf`/`tar -xzf`. Neither is
+  // guaranteed present: Debian's minimal/cloud images ship wget but NOT curl,
+  // and slim container bases often have neither. Without these checks a missing
+  // binary surfaced only after the manifest fetch and the whole wizard, as an
+  // opaque ENOENT from a child process with no hint about which one.
+  for (const bin of ["curl", "tar"] as const) {
+    const r = await tryExec(bin, ["--version"]);
+    const found = !r.notFound;
+    checks.push({
+      name: bin,
+      ok: found,
+      detail: found
+        ? (r.output.trim().split("\n")[0] || "present")
+        : `${bin}: command not found — required to download the release artifacts`,
+      fatal: true,
+    });
+  }
+
   // Architecture
   const arch = checkArch(process.arch);
   checks.push({
@@ -198,14 +248,32 @@ export async function runPreflight(opts: {
     });
   }
 
-  // Ports (localhost mode only)
+  // Ports. Callers pass the set that this install will actually publish:
+  // localhost mode publishes the five app ports, domain mode publishes 80/443
+  // through caddy (NOT none, as an earlier comment in install.ts claimed).
   for (const port of opts.ports ?? []) {
-    const free = await checkPort(port, opts.bindAddr ?? "127.0.0.1");
+    const probe = await probePort(port, opts.bindAddr ?? "127.0.0.1");
+    // EACCES is not a conflict — it means this process is not privileged enough
+    // to bind a port below 1024, which is the normal case for 80/443 when the
+    // installer is not run as root. Reporting it as "in use" (and, under
+    // portsFatal, aborting on it) would break every non-root domain install.
+    // Only EADDRINUSE proves something is already listening.
+    const inUse = !probe.free && probe.code === "EADDRINUSE";
     checks.push({
       name: `Port ${port}`,
-      ok: free,
-      detail: free ? "free" : "in use — choose another",
-      fatal: false,
+      ok: probe.free,
+      detail: probe.free
+        ? "free"
+        : inUse
+          ? "in use — choose another"
+          : probe.code === "EACCES"
+            ? `cannot verify without root (EACCES) — make sure nothing else is on ${port}`
+            : `cannot verify (${probe.code ?? "unknown error"})`,
+      // Not fatal unless something is genuinely listening: an unverifiable probe
+      // is reported as a warning (ok: false, fatal: false), which callers print
+      // but which never fails the report.
+      fatal: Boolean(opts.portsFatal) && inUse,
+      port,
     });
   }
 

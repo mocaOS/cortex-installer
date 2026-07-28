@@ -1,5 +1,39 @@
+import { writeFileSync, chmodSync, renameSync, rmSync } from "node:fs";
 import { imageRefs, type Stack } from "./stack.js";
 import type { GeneratedSecrets } from "./secrets.js";
+
+/**
+ * Writes .env atomically, at mode 600, via a temp file and a rename.
+ *
+ * `writeFileSync(envPath, ...)` opens the real file with O_TRUNC, so for a
+ * moment .env is a zero-byte file — and `update` calls it on a file that holds
+ * the ONLY copy of NEO4J_PASSWORD. A crash, a full disk or a killed process in
+ * that window loses it permanently: Neo4j reads NEO4J_AUTH only when its data
+ * volume is first created, so a graph whose password is gone can never be
+ * authenticated against again, and no amount of re-running the installer helps.
+ *
+ * rename(2) within a directory is atomic, so a reader either sees the whole old
+ * file or the whole new one and the original survives any failure before the
+ * rename. The temp file must therefore live in the SAME directory as the target
+ * (a rename across filesystems is not atomic and fails with EXDEV).
+ *
+ * The mode is set on the temp file before the rename, not on the target after
+ * it, so the secrets are never briefly world-readable.
+ */
+export function writeEnvFile(envPath: string, contents: string): void {
+  const tmp = `${envPath}.tmp`;
+  try {
+    writeFileSync(tmp, contents, { mode: 0o600 });
+    // Explicit chmod too: the `mode` option above only applies when the file is
+    // created, so a leftover tmp file from an earlier interrupted run would keep
+    // its old, possibly looser, permissions.
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, envPath);
+  } catch (err) {
+    rmSync(tmp, { force: true });
+    throw err;
+  }
+}
 
 export interface InstallConfig {
   mode: "localhost" | "domain";

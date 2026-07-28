@@ -3,7 +3,7 @@ import { prompts as p } from "./ui.js";
 import { PROVIDERS, providerById } from "./providers.js";
 import { generateSecrets, validateSecret, type GeneratedSecrets } from "./secrets.js";
 import { listModels, probeChat, probeEmbedding } from "./validate.js";
-import { checkPort, existingProjectVolumes } from "./preflight.js";
+import { checkPort, probePort, existingProjectVolumes } from "./preflight.js";
 import type { InstallConfig } from "./env.js";
 import type { Stack } from "./stack.js";
 
@@ -60,17 +60,53 @@ export function buildConfigNonInteractive(
   }
 
   const missing: string[] = [];
+  const invalid: string[] = [];
   const need = (k: string): string => {
     const v = env[k];
     if (!v) { missing.push(k); return ""; }
     return v;
   };
 
+  /**
+   * Every numeric value here used to be a bare `Number(...)`, which never fails
+   * — it returns NaN. `CORTEX_EMBEDDING_DIMENSION=not-a-number` therefore
+   * rendered into .env as literally `EMBEDDING_DIMENSION=NaN`, and a bad
+   * CORTEX_APP_PORT as `NaN`, with the install continuing all the way through
+   * the pull to a container that fails on a value nobody typed.
+   *
+   * Bad values are collected rather than thrown on sight, matching the
+   * missing-value behaviour below: one run should report everything wrong with
+   * the environment, not make the operator rediscover it a variable at a time.
+   */
+  const needInt = (k: string, min: number, max: number, fallback?: number): number => {
+    const raw = env[k];
+    if (raw === undefined || raw.trim() === "") {
+      if (fallback !== undefined) return fallback;
+      missing.push(k);
+      return 0;
+    }
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < min || n > max) {
+      invalid.push(`${k}="${raw}" — must be a whole number between ${min} and ${max}`);
+      return fallback ?? 0;
+    }
+    return n;
+  };
+
   const adminEmail = need("CORTEX_ADMIN_EMAIL");
   const apiKey = need("CORTEX_OPENAI_API_KEY");
   const chatModel = need("CORTEX_OPENAI_MODEL");
   const embeddingModel = need("CORTEX_EMBEDDING_MODEL");
-  const embeddingDimension = Number(need("CORTEX_EMBEDDING_DIMENSION"));
+  // Upper bound is deliberately loose — the point is catching NaN and nonsense,
+  // not second-guessing what a future embedding model might return.
+  const embeddingDimension = needInt("CORTEX_EMBEDDING_DIMENSION", 1, 100_000);
+  const ports = {
+    app: needInt("CORTEX_APP_PORT", 1, 65535, DEFAULT_PORTS.app),
+    chat: needInt("CORTEX_CHAT_PORT", 1, 65535, DEFAULT_PORTS.chat),
+    api: needInt("CORTEX_API_PORT", 1, 65535, DEFAULT_PORTS.api),
+    neo4jHttp: needInt("CORTEX_NEO4J_HTTP_PORT", 1, 65535, DEFAULT_PORTS.neo4jHttp),
+    neo4jBolt: needInt("CORTEX_NEO4J_BOLT_PORT", 1, 65535, DEFAULT_PORTS.neo4jBolt),
+  };
 
   let domains: InstallConfig["domains"];
   if (mode === "domain") {
@@ -80,9 +116,16 @@ export function buildConfigNonInteractive(
     domains = { app, chat, acmeEmail };
   }
 
-  if (missing.length) {
+  if (missing.length || invalid.length) {
+    const parts: string[] = [];
+    if (missing.length) {
+      parts.push(`missing required values:\n  - ${missing.join("\n  - ")}`);
+    }
+    if (invalid.length) {
+      parts.push(`invalid values:\n  - ${invalid.join("\n  - ")}`);
+    }
     throw new Error(
-      `Non-interactive install is missing required values:\n  - ${missing.join("\n  - ")}\n` +
+      `Non-interactive install cannot proceed — ${parts.join("\n")}\n` +
         `Set them in the environment, or drop --yes to use the wizard.`
     );
   }
@@ -121,13 +164,7 @@ export function buildConfigNonInteractive(
       embeddingDimension,
       embeddingSendDimensions: env.CORTEX_EMBEDDING_SEND_DIMENSIONS !== "false",
     },
-    ports: {
-      app: Number(env.CORTEX_APP_PORT ?? DEFAULT_PORTS.app),
-      chat: Number(env.CORTEX_CHAT_PORT ?? DEFAULT_PORTS.chat),
-      api: Number(env.CORTEX_API_PORT ?? DEFAULT_PORTS.api),
-      neo4jHttp: Number(env.CORTEX_NEO4J_HTTP_PORT ?? DEFAULT_PORTS.neo4jHttp),
-      neo4jBolt: Number(env.CORTEX_NEO4J_BOLT_PORT ?? DEFAULT_PORTS.neo4jBolt),
-    },
+    ports,
     domains,
     errorReporting: env.CORTEX_ERROR_REPORTING === "true",
   };
@@ -219,6 +256,28 @@ export async function runWizard(opts: { stack: Stack; dir: string }): Promise<In
         );
       }
     }
+    // Domain mode DOES publish ports — caddy binds 80, 443 and 443/udp, and it
+    // is the only service that publishes anything at all in this mode. Another
+    // web server already on :80 (a host nginx or Apache is the common case) means
+    // caddy cannot start and, worse, cannot complete the ACME HTTP-01 challenge,
+    // so no certificate is ever issued.
+    //
+    // Warn rather than abort: probing a privileged port as a non-root user
+    // returns EACCES, not EADDRINUSE, so we frequently cannot tell — and the
+    // operator in front of an interactive prompt can check for themselves.
+    const busy: string[] = [];
+    for (const port of [80, 443]) {
+      const probe = await probePort(port);
+      if (probe.code === "EADDRINUSE") busy.push(String(port));
+    }
+    if (busy.length) {
+      p.log.warn(
+        `Port ${busy.join(" and ")} already in use on this host. Caddy needs 80 and 443 ` +
+          `both to serve Cortex and to answer Let's Encrypt's HTTP challenge — stop ` +
+          `whatever is listening there, or put Cortex behind it.`
+      );
+    }
+
     const dnsOk = await p.confirm({
       message: "Continue? Both domains must point at this host before Caddy starts.",
       initialValue: true,
@@ -293,7 +352,10 @@ export async function runWizard(opts: { stack: Stack; dir: string }): Promise<In
     message: "Setup depth",
     options: [
       { value: "quick", label: "Quick", hint: "one provider, sensible defaults" },
-      { value: "advanced", label: "Advanced", hint: "per-task models, resources, SMTP" },
+      // Keep this hint honest about what Advanced actually prompts for below:
+      // a graph-extraction model, a vision model and optional SMTP. It used to
+      // promise "resources", which it has never asked about.
+      { value: "advanced", label: "Advanced", hint: "graph-extraction & vision models, SMTP" },
     ],
   });
   if (p.isCancel(depth)) bail("Cancelled.");

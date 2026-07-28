@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { renderEnv, REQUIRED_VARS, type InstallConfig } from "../src/env.js";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, statSync, existsSync, chmodSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { renderEnv, writeEnvFile, REQUIRED_VARS, type InstallConfig } from "../src/env.js";
 import { parseStack } from "../src/stack.js";
 import { generateSecrets } from "../src/secrets.js";
 
@@ -151,4 +154,48 @@ test("output has no CRLF and ends with a newline", () => {
   const text = renderEnv(base());
   assert.doesNotMatch(text, /\r/);
   assert.ok(text.endsWith("\n"));
+});
+
+// --- writeEnvFile: atomic, and 600 from the moment it exists -----------------
+// `update` rewrites the file that holds the ONLY copy of NEO4J_PASSWORD. A plain
+// writeFileSync opens it O_TRUNC, so a crash in that window loses the password
+// permanently — Neo4j reads NEO4J_AUTH only when its data volume is first
+// created, so the graph can never be authenticated against again.
+test("writeEnvFile creates the file at mode 600, never briefly world-readable", () => {
+  const dir = mkdtempSync(join(tmpdir(), "envw-"));
+  const path = join(dir, ".env");
+  writeEnvFile(path, "NEO4J_PASSWORD=hunter2\n");
+  assert.equal(readFileSync(path, "utf8"), "NEO4J_PASSWORD=hunter2\n");
+  assert.equal(statSync(path).mode & 0o777, 0o600);
+});
+
+test("writeEnvFile replaces an existing file and leaves no temp file behind", () => {
+  const dir = mkdtempSync(join(tmpdir(), "envw-"));
+  const path = join(dir, ".env");
+  writeFileSync(path, "OLD=1\n");
+  writeEnvFile(path, "NEW=2\n");
+  assert.equal(readFileSync(path, "utf8"), "NEW=2\n");
+  assert.equal(existsSync(`${path}.tmp`), false, "the temp file must be renamed away, not left behind");
+});
+
+test("writeEnvFile tightens the mode even when a stale temp file exists from an interrupted run", () => {
+  const dir = mkdtempSync(join(tmpdir(), "envw-"));
+  const path = join(dir, ".env");
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, "LEFTOVER=1\n");
+  chmodSync(tmp, 0o644); // writeFileSync's `mode` option does not apply to an existing file
+  writeEnvFile(path, "NEO4J_PASSWORD=hunter2\n");
+  assert.equal(statSync(path).mode & 0o777, 0o600);
+});
+
+test("writeEnvFile leaves the original intact when the write cannot be performed", () => {
+  const dir = mkdtempSync(join(tmpdir(), "envw-"));
+  const path = join(dir, ".env");
+  writeEnvFile(path, "NEO4J_PASSWORD=keepme\n");
+  // A directory in the temp file's place makes the write fail; the point is that
+  // the previous .env still holds the password afterwards, which is precisely
+  // what a truncating write could not promise.
+  mkdirSync(`${path}.tmp`);
+  assert.throws(() => writeEnvFile(path, "NEO4J_PASSWORD=replacement\n"));
+  assert.equal(readFileSync(path, "utf8"), "NEO4J_PASSWORD=keepme\n");
 });

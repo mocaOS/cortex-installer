@@ -1,11 +1,12 @@
-import { readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { writeEnvFile } from "../env.js";
 import { banner, noteBox, prompts as p } from "../ui.js";
 import { installerVersion } from "../version.js";
 import { fetchStack, assertInstallerSupported } from "../stack.js";
 import { fetchArtifacts } from "../artifacts.js";
 import { writeState } from "../state.js";
-import { pull, up, waitHealthy, execIn } from "../docker.js";
+import { pull, up, waitHealthy, healthServices, execIn } from "../docker.js";
 import { diffComponents, rewriteImagePins } from "../update.js";
 import { resolveInstall } from "./_shared.js";
 
@@ -54,9 +55,11 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
   await fetchArtifacts({ version: latest.stack, dir });
   s.stop("Release artifacts updated");
 
+  // Atomic: this file holds the only copy of NEO4J_PASSWORD, and a truncating
+  // write that dies mid-flight makes the graph permanently unauthenticatable.
+  // See writeEnvFile.
   const envPath = join(dir, ".env");
-  writeFileSync(envPath, rewriteImagePins(readFileSync(envPath, "utf8"), latest.components));
-  chmodSync(envPath, 0o600);
+  writeEnvFile(envPath, rewriteImagePins(readFileSync(envPath, "utf8"), latest.components));
   p.log.success("Repinned images in .env (your other settings untouched)");
 
   const pulled = new Set<string>();
@@ -69,7 +72,10 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
   s.stop("Containers recreated");
 
   s.start("Waiting for health");
-  const ok = await waitHealthy(dir, ["neo4j", "backend", "frontend", "chat"]);
+  // state.mode decides whether caddy is part of the stack — see healthServices.
+  // An update that leaves caddy crash-looping on the new version is exactly the
+  // case this must not report as healthy.
+  const ok = await waitHealthy(dir, healthServices(state.mode));
   s.stop(ok ? "All services healthy" : "Timed out waiting for health");
 
   writeState(dir, {
@@ -81,17 +87,27 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
   });
 
   if (!ok) {
-    // Point at cortex.json rather than describing values inline. The pin set is
-    // five keys, and neo4j/caddy do NOT use the stack's semver (they are e.g.
-    // 5.26-community and 2-alpine) — so "set the CORTEX_*_IMAGE lines to
-    // <stack>" is both incomplete and wrong for the two most likely to have
-    // caused a health failure. `state` here is still the pre-update state:
-    // writeState above wrote a new object to disk but never reassigned this
-    // binding, so state.components are genuinely the previous pins.
+    // `state` here is still the PRE-update state: writeState above wrote a new
+    // object to disk but never reassigned this binding, so state.stack and
+    // state.components are genuinely the previous release's.
+    //
+    // The five .env lines alone are not a rollback and never were. fetchArtifacts
+    // has already replaced docker-compose.yml, the overlays, Caddyfile.template
+    // and ops/ with the NEW release's copies, so repinning the images by hand
+    // leaves old images running against new compose files — a combination that
+    // was never tested. `cortex update --stack <previous>` re-fetches that
+    // release's artifacts AND repins .env to match, which is the only sequence
+    // that actually restores the previous install. The manual lines stay as a
+    // fallback for when the release manifest itself is unreachable.
     const prev = state.components;
     p.log.error(
-      `Health check timed out. Roll back by restoring these five lines in .env ` +
-        `(also recorded as \`previous\` in cortex.json), then \`cortex start\`:\n` +
+      `Health check timed out on ${latest.stack}. To go back to ${state.stack}:\n\n` +
+        `  npx @mocaos/cortex update --stack ${state.stack}\n\n` +
+        `That re-fetches ${state.stack}'s compose files and repins .env together — ` +
+        `note that editing .env alone is NOT enough, because the compose files in ` +
+        `this directory have already been replaced with ${latest.stack}'s.\n` +
+        `If the manifest is unreachable, restore these pins by hand (also recorded ` +
+        `as \`previous\` in cortex.json) and re-fetch ${state.stack}'s artifacts:\n` +
         `  CORTEX_BACKEND_IMAGE=ghcr.io/mocaos/cortex-backend:${prev.backend}\n` +
         `  CORTEX_FRONTEND_IMAGE=ghcr.io/mocaos/cortex-frontend:${prev.frontend}\n` +
         `  CORTEX_CHAT_IMAGE=ghcr.io/mocaos/cortex-chat:${prev.chat}\n` +

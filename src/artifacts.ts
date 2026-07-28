@@ -24,7 +24,22 @@ export const ARTIFACT_FILES = [
  * attaches only stack.json, so the tarball is the supply route.
  */
 export async function fetchArtifacts(opts: { version: string; dir: string }): Promise<void> {
-  const url = `https://api.github.com/repos/${REPO}/tarball/v${opts.version}`;
+  /**
+   * codeload, NOT api.github.com/repos/.../tarball/.
+   *
+   * The API endpoint is rate-limited to 60 requests per hour per IP for
+   * unauthenticated callers, and that quota is shared by everything else on the
+   * address. Behind office NAT, a CI runner or a CGNAT'd home ISP the limit can
+   * already be spent by someone else entirely, and the installer then dies on an
+   * opaque `curl: (22) The requested URL returned error: 403` — after the
+   * wizard, with no hint that waiting an hour is the fix.
+   *
+   * /archive/refs/tags/<tag>.tar.gz serves the identical tarball from the same
+   * CDN the API redirects to anyway, and is not subject to the API rate limit.
+   * The only difference is the archive's top-level directory name, which is
+   * discovered from the listing below rather than assumed.
+   */
+  const url = `https://github.com/${REPO}/archive/refs/tags/v${opts.version}.tar.gz`;
   const work = mkdtempSync(join(tmpdir(), "cortex-art-"));
   const tgz = join(work, "src.tar.gz");
 
@@ -81,6 +96,17 @@ export async function fetchArtifacts(opts: { version: string; dir: string }): Pr
     const msg = String(err?.stderr ?? err?.message ?? err);
     if (/404/.test(msg)) {
       throw new Error(`No release found for v${opts.version} (HTTP 404)`);
+    }
+    // 403 from GitHub is almost never "forbidden" here — the repo is public and
+    // the URL takes no credentials. It means either a rate limit or an egress
+    // proxy refusing the request, both of which the operator can act on.
+    if (/\b403\b/.test(msg)) {
+      throw new Error(
+        `GitHub refused the download for v${opts.version} (HTTP 403). This is usually ` +
+          `a rate limit on your IP — wait a few minutes and retry — or an outbound ` +
+          `proxy blocking github.com. Verify with:\n` +
+          `  curl -fsSLI ${url}`
+      );
     }
     throw new Error(`Could not fetch release artifacts for v${opts.version}: ${msg}`);
   } finally {

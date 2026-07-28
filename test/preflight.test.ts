@@ -6,6 +6,8 @@ import {
   parseComposeVersion,
   checkArch,
   checkPort,
+  probePort,
+  runPreflight,
   filterProjectVolumes,
 } from "../src/preflight.js";
 
@@ -87,4 +89,77 @@ test("filterProjectVolumes trims whitespace from `docker volume ls` output lines
 
 test("filterProjectVolumes returns nothing for a project with no existing volumes", () => {
   assert.deepEqual(filterProjectVolumes(["unrelated_data"], "cortex-e2e"), []);
+});
+
+// --- probePort: "in use" vs "not allowed to find out" -----------------------
+// Binding a port below 1024 needs root on Linux and macOS alike, so probing
+// 80/443 as the ordinary user who runs the installer fails with EACCES. Treating
+// that as a conflict would abort every non-root domain-mode install on a host
+// where :80 is in fact free, so the errno has to be carried out of the probe.
+test("probePort reports a free port as free with no errno", async () => {
+  const r = await probePort(45241);
+  assert.equal(r.free, true);
+  assert.equal(r.code, undefined);
+});
+
+test("probePort distinguishes a genuinely occupied port with EADDRINUSE", async () => {
+  const srv = createServer();
+  await new Promise<void>((res) => srv.listen(45242, "127.0.0.1", res));
+  try {
+    const r = await probePort(45242);
+    assert.equal(r.free, false);
+    assert.equal(r.code, "EADDRINUSE");
+  } finally {
+    await new Promise<void>((res) => srv.close(() => res()));
+  }
+});
+
+test("runPreflight marks a genuinely occupied port fatal only when portsFatal is set", async () => {
+  const srv = createServer();
+  await new Promise<void>((res) => srv.listen(45243, "127.0.0.1", res));
+  try {
+    const warn = await runPreflight({ ports: [45243] });
+    const wc = warn.checks.find((c) => c.port === 45243)!;
+    assert.equal(wc.ok, false);
+    assert.equal(wc.fatal, false, "the wizard path must only warn — it resolves conflicts itself");
+    assert.match(wc.detail, /in use/);
+
+    const fatal = await runPreflight({ ports: [45243], portsFatal: true });
+    const fc = fatal.checks.find((c) => c.port === 45243)!;
+    assert.equal(fc.fatal, true, "--yes cannot prompt, so an occupied port must abort");
+    assert.equal(fatal.ok, false);
+  } finally {
+    await new Promise<void>((res) => srv.close(() => res()));
+  }
+});
+
+test("an unverifiable privileged port never aborts the install, even under portsFatal", async () => {
+  // Skipped when running as root, where 80 is genuinely bindable and this
+  // distinction cannot arise.
+  if (typeof process.getuid === "function" && process.getuid() === 0) return;
+  const r = await runPreflight({ ports: [80], portsFatal: true });
+  const c = r.checks.find((x) => x.port === 80)!;
+  // Either the port bound (some sandboxes permit it) or it could not be checked.
+  if (!c.ok) {
+    assert.equal(c.fatal, false, "EACCES means 'cannot check', not 'occupied'");
+    assert.match(c.detail, /cannot verify/);
+    assert.equal(r.ok, true, "an unperformable check must not fail the report");
+  }
+});
+
+test("port checks are tagged with their port so callers need no string matching", async () => {
+  const r = await runPreflight({ ports: [45244] });
+  assert.equal(r.checks.filter((c) => c.port !== undefined).length, 1);
+  assert.equal(r.checks.find((c) => c.port === 45244)!.name, "Port 45244");
+});
+
+// curl and tar are hard requirements of fetchArtifacts, which shells out to
+// both. Debian's minimal images ship wget but not curl.
+test("runPreflight checks for curl and tar, fatally", async () => {
+  const r = await runPreflight({});
+  for (const bin of ["curl", "tar"]) {
+    const c = r.checks.find((x) => x.name === bin);
+    assert.ok(c, `no preflight check for ${bin}`);
+    assert.equal(c!.fatal, true, `${bin} must be fatal — fetchArtifacts cannot work without it`);
+  }
 });

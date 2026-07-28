@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { composeArgs, parsePullProgress, parseHealth, ServiceStatus } from "../src/docker.js";
+import { composeArgs, parsePullProgress, parseHealth, healthServices, ServiceStatus } from "../src/docker.js";
 
 test("composeArgs pins the project directory (cwd independence additionally requires cwd: dir on the child process — see run/pull/logs)", () => {
   const a = composeArgs("/opt/cortex");
@@ -96,4 +96,36 @@ test("parseHealth spreads arrays found in per-line parsing, not phantom rows", (
     { service: "neo4j", state: "running", health: "healthy" },
     { service: "chat", state: "running", health: null },
   ]);
+});
+
+// --- healthServices --------------------------------------------------------
+// caddy is the only service publishing ports in domain mode, so leaving it out
+// of the health wait let the installer print "All services healthy" plus https
+// URLs while nothing was listening on 80/443. It must equally NOT be watched in
+// localhost mode, where the caddy overlay is not composed in at all and waiting
+// on it would burn the full timeout on a container that never exists.
+test("healthServices watches caddy in domain mode", () => {
+  const svc = healthServices("domain");
+  assert.ok(svc.includes("caddy"), `expected caddy in ${JSON.stringify(svc)}`);
+  assert.deepEqual(svc, ["neo4j", "backend", "frontend", "chat", "caddy"]);
+});
+
+test("healthServices does not watch caddy in localhost mode", () => {
+  const svc = healthServices("localhost");
+  assert.ok(!svc.includes("caddy"), `caddy must not be watched: ${JSON.stringify(svc)}`);
+  assert.deepEqual(svc, ["neo4j", "backend", "frontend", "chat"]);
+});
+
+test("healthServices always watches the four application services", () => {
+  for (const mode of ["localhost", "domain"] as const) {
+    for (const name of ["neo4j", "backend", "frontend", "chat"]) {
+      assert.ok(healthServices(mode).includes(name), `${mode} must watch ${name}`);
+    }
+  }
+});
+
+test("healthServices returns a fresh array each call (callers must not mutate shared state)", () => {
+  const a = healthServices("domain");
+  a.push("mutated");
+  assert.ok(!healthServices("domain").includes("mutated"));
 });

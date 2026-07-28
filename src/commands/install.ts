@@ -1,13 +1,13 @@
-import { existsSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { banner, noteBox, prompts as p } from "../ui.js";
 import { installerVersion } from "../version.js";
 import { fetchStack, assertInstallerSupported } from "../stack.js";
 import { runPreflight, existingProjectVolumes } from "../preflight.js";
 import { fetchArtifacts } from "../artifacts.js";
-import { renderEnv } from "../env.js";
+import { renderEnv, writeEnvFile } from "../env.js";
 import { writeState } from "../state.js";
-import { pull, up, waitHealthy } from "../docker.js";
+import { pull, up, waitHealthy, healthServices } from "../docker.js";
 import { runWizard, buildConfigNonInteractive, checkProjectVolumeCollision } from "../wizard.js";
 import { probeChat, probeEmbedding } from "../validate.js";
 
@@ -25,7 +25,14 @@ type Spinner = ReturnType<typeof p.spinner>;
  * two paths behave identically.
  */
 async function probeLlmOrExit(
-  llm: { baseUrl: string; apiKey: string; chatModel: string; embeddingModel: string },
+  llm: {
+    baseUrl: string;
+    apiKey: string;
+    chatModel: string;
+    embeddingModel: string;
+    embeddingDimension: number;
+    embeddingSendDimensions: boolean;
+  },
   s: Spinner
 ): Promise<void> {
   s.start("Testing chat completion");
@@ -51,6 +58,46 @@ async function probeLlmOrExit(
     process.exit(1);
   }
   s.stop(`Embeddings OK — ${embedProbe.dimension} dimensions detected`);
+
+  /**
+   * The measured dimension is ground truth; CORTEX_EMBEDDING_DIMENSION is only
+   * a claim. The wizard has no equivalent of this check because it does not need
+   * one — it takes embedProbe.dimension directly. --yes takes the operator's
+   * declared value, and previously printed the measured one and then discarded
+   * it, so a typo (or a model whose dimension the operator misremembered) wrote
+   * the wrong number into .env.
+   *
+   * That has to be fatal rather than a warning, and it cannot be silently
+   * "corrected" to the measured value either. EMBEDDING_DIMENSION is baked into
+   * the Neo4j vector index the first time the backend creates it, and changing it
+   * afterwards means re-embedding every chunk in the graph — so an install that
+   * proceeds on a mismatch is an install the operator has to redo from scratch.
+   * Failing here costs them one re-run with the right number.
+   */
+  if (embedProbe.dimension !== llm.embeddingDimension) {
+    p.log.error(
+      `Embedding dimension mismatch.\n` +
+        `  ${llm.embeddingModel} really returns ${embedProbe.dimension} dimensions, ` +
+        `but CORTEX_EMBEDDING_DIMENSION says ${llm.embeddingDimension}.\n` +
+        `  This value is baked into the Neo4j vector index on first use and cannot be ` +
+        `changed later without re-embedding everything.\n` +
+        `  Set CORTEX_EMBEDDING_DIMENSION=${embedProbe.dimension} (or point ` +
+        `CORTEX_EMBEDDING_MODEL at a model that really is ${llm.embeddingDimension}-dimensional).`
+    );
+    p.cancel("Refusing to bake a wrong dimension into the graph. Nothing was written.");
+    process.exit(1);
+  }
+
+  // Not fatal: getting this wrong costs one rejected request per embedding call
+  // at worst, and the backend can be corrected in .env afterwards without
+  // touching the index.
+  if (embedProbe.sendDimensions !== llm.embeddingSendDimensions) {
+    p.log.warn(
+      `CORTEX_EMBEDDING_SEND_DIMENSIONS is ${llm.embeddingSendDimensions}, but this ` +
+        `endpoint ${embedProbe.sendDimensions ? "does" : "does not"} accept an explicit ` +
+        `\`dimensions\` parameter. ${embedProbe.sendDimensions ? "Leaving it off is safe." : `Set it to false.`}`
+    );
+  }
 }
 
 export async function run(ctx: { flags: Record<string, string | boolean> }): Promise<void> {
@@ -63,6 +110,31 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
       `${dir} already contains an install.\n` +
         `  Use \`cortex update\` to move it to the latest release, or ` +
         `\`cortex config\` to change settings.`
+    );
+    process.exit(1);
+  }
+
+  /**
+   * cortex.json alone is not enough of a guard. `install --dir .` into a
+   * directory that is not a Cortex install but is not empty either — the
+   * overwhelmingly likely case being an existing project, or a second install
+   * attempt that was interrupted before writing state — silently destroys
+   * files: fetchArtifacts cpSync's the release's whole selfhost/ tree over the
+   * target (README.md among them) and .env is then written unconditionally.
+   * Losing a .env means losing the only copy of NEO4J_PASSWORD, which Neo4j
+   * only ever honours at first volume creation, so it is unrecoverable.
+   *
+   * Refuse up front, naming the files, rather than after the manifest fetch and
+   * the entire wizard.
+   */
+  const CLOBBERABLE = [".env", "docker-compose.yml", "README.md"];
+  const present = CLOBBERABLE.filter((f) => existsSync(join(dir, f)));
+  if (present.length) {
+    p.cancel(
+      `${dir} already contains files this install would overwrite:\n` +
+        present.map((f) => `  - ${f}`).join("\n") +
+        `\n  Install into an empty directory instead (\`--dir ./cortex\`), or move ` +
+        `these files aside first.\n  Nothing was written.`
     );
     process.exit(1);
   }
@@ -82,9 +154,13 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
 
   // --- preflight ----------------------------------------------------------
   s.start("Checking your environment");
-  // No ports here: the wizard resolves port conflicts interactively (and
-  // domain mode publishes none), so checking defaults now would only produce a
-  // warning the wizard immediately fixes.
+  // No ports in THIS pass: which ports matter is not known until the mode and
+  // port config exist, and the interactive wizard resolves localhost conflicts
+  // itself (resolvePorts) so checking the defaults here would only produce a
+  // warning it immediately fixes. Ports are checked below, once cfg is known —
+  // including domain mode, which does publish 80/443 via caddy. (An earlier
+  // version of this comment claimed domain mode published no ports at all,
+  // which is how both --yes and domain mode ended up with no port check.)
   const pre = await runPreflight({});
   s.stop("Environment checked");
   for (const c of pre.checks) {
@@ -124,6 +200,37 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
     );
     if (volumeWarning) p.log.warn(volumeWarning);
 
+    /**
+     * Ports. The wizard has resolvePorts for localhost and (now) a warn-plus-
+     * confirm for 80/443 in domain mode; --yes can do neither, and previously
+     * did nothing at all — runPreflight({}) above probes no ports, so a busy
+     * port only surfaced as a `docker compose up` bind failure after the full
+     * 1.7 GB image pull.
+     *
+     * portsFatal makes an occupied port abort here instead. Only a genuine
+     * EADDRINUSE is fatal: probing 80/443 as a non-root user fails with EACCES,
+     * which means "cannot check", not "occupied", and must never abort — see
+     * probePort in preflight.ts.
+     */
+    const portsToCheck =
+      cfg.mode === "domain" ? [80, 443] : Object.values(cfg.ports);
+    s.start("Checking ports");
+    const portPre = await runPreflight({ ports: portsToCheck, portsFatal: true });
+    s.stop("Ports checked");
+    for (const c of portPre.checks.filter((x) => x.port !== undefined)) {
+      const line = `${c.name}: ${c.detail}`;
+      if (c.ok) p.log.success(line);
+      else if (c.fatal) p.log.error(line);
+      else p.log.warn(line);
+    }
+    if (!portPre.ok) {
+      p.cancel(
+        `A port this install needs is already in use. Free it, or set the ` +
+          `CORTEX_*_PORT variables to something else. Nothing was written.`
+      );
+      process.exit(1);
+    }
+
     await probeLlmOrExit(cfg.llm, s);
   }
 
@@ -134,9 +241,10 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
   await fetchArtifacts({ version: stack.stack, dir });
   s.stop("Release artifacts in place");
 
+  // Same writer as `update` — creates the file already at mode 600 rather than
+  // writing it world-readable and chmod'ing afterwards. See writeEnvFile.
   const envPath = join(dir, ".env");
-  writeFileSync(envPath, renderEnv(cfg));
-  chmodSync(envPath, 0o600);
+  writeEnvFile(envPath, renderEnv(cfg));
   p.log.success(`Wrote ${envPath} (mode 600)`);
 
   writeState(dir, {
@@ -167,7 +275,10 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
   s.stop("Stack started");
 
   s.start("Waiting for services to become healthy");
-  const healthy = await waitHealthy(dir, ["neo4j", "backend", "frontend", "chat"], 300_000, (st) => {
+  // In domain mode this includes caddy, which is the only service publishing
+  // ports there — see healthServices. Without it the URLs printed below could
+  // be announced as working while nothing was listening on 80/443 at all.
+  const healthy = await waitHealthy(dir, healthServices(cfg.mode), 300_000, (st) => {
     s.message(`Waiting — ${st.map((x) => `${x.service}:${x.health ?? x.state}`).join(" ")}`);
   });
   s.stop(healthy ? "All services healthy" : "Timed out waiting for health");

@@ -148,6 +148,27 @@ export function logs(dir: string, service?: string): Promise<number> {
 }
 
 /**
+ * The services `waitHealthy` must watch, for a given install mode.
+ *
+ * caddy is not optional in domain mode — it is the ONLY service that publishes
+ * ports there (80, 443, 443/udp), so the four application services can every
+ * one of them be healthy while caddy fails to bind :80 or crash-loops on a bad
+ * Caddyfile. With caddy left out, the installer printed "All services healthy"
+ * followed by https:// URLs that resolved to nothing at all, which is the worst
+ * possible ending: it looks like a success.
+ *
+ * It is equally important NOT to watch caddy in localhost mode, where the caddy
+ * overlay is not composed in — the container does not exist, `ps` never lists
+ * it, and waitHealthy would spin for the full five-minute timeout waiting for a
+ * service that is never coming.
+ */
+export function healthServices(mode: "localhost" | "domain"): string[] {
+  const services = ["neo4j", "backend", "frontend", "chat"];
+  if (mode === "domain") services.push("caddy");
+  return services;
+}
+
+/**
  * Waits for the named services to report healthy. Services without a
  * healthcheck (frontend, chat, caddy) are satisfied by `running`.
  */

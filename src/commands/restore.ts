@@ -44,25 +44,29 @@ export async function run(ctx: {
   const typed = await p.text({ message: `Type "restore" to confirm`, validate: (v) => (v === "restore" ? undefined : "Type restore to continue") });
   if (p.isCancel(typed)) { p.cancel("Cancelled."); return; }
 
-  // No spinner and no partial execution here on purpose: step 3 of the runbook
-  // needs host-level `docker run` to write volumes the sidecar mounts
-  // read-only, so wrapping only some steps would leave the operator with a
-  // half-restored instance and no signal about it. Print the whole runbook.
+  // No spinner and no partial execution here on purpose: step 3 needs
+  // host-level `docker run` to write volumes the sidecar mounts read-only, so
+  // wrapping only some steps would leave the operator with a half-restored
+  // instance and no signal about it. Print the whole runbook.
+  //
+  // The steps are numbered explicitly because the prose has to refer to one of
+  // them, and an unnumbered list plus a bare "step 2" is exactly how that
+  // reference drifted out of sync with the list it describes.
   p.log.warn(
-    `Now run these from ${dir} — they need host-level docker access that this\n` +
-      `CLI deliberately does not wrap, because step 2 writes to volumes the\n` +
-      `sidecar cannot:\n\n` +
-      `  docker compose stop backend\n` +
-      `  docker compose exec -e RESTORE_WIPE=yes backup /restore.sh ${stamp}\n` +
-      `  docker run --rm \\\n` +
-      `    -v ${state.projectName}_uploads_data:/data/uploads \\\n` +
-      `    -v ${state.projectName}_custom_inputs_data:/data/custom_inputs \\\n` +
-      `    -v ${state.projectName}_chat_data:/data/chat \\\n` +
-      `    -v ${state.projectName}_skills_data:/data/skills \\\n` +
-      `    -v ${state.projectName}_apps_data:/data/apps \\\n` +
-      `    -v ${state.projectName}_backups:/backups:ro \\\n` +
-      `    alpine tar -xzf /backups/${stamp}/files.tar.gz -C /\n` +
-      `  docker compose start backend`
+    `Now run these from ${dir}, in order — they need host-level docker access\n` +
+      `that this CLI deliberately does not wrap, because step 3 writes to volumes\n` +
+      `the backup sidecar can only read:\n\n` +
+      `  1. docker compose stop backend\n\n` +
+      `  2. docker compose exec -e RESTORE_WIPE=yes backup /restore.sh ${stamp}\n\n` +
+      `  3. docker run --rm \\\n` +
+      `       -v ${state.projectName}_uploads_data:/data/uploads \\\n` +
+      `       -v ${state.projectName}_custom_inputs_data:/data/custom_inputs \\\n` +
+      `       -v ${state.projectName}_chat_data:/data/chat \\\n` +
+      `       -v ${state.projectName}_skills_data:/data/skills \\\n` +
+      `       -v ${state.projectName}_apps_data:/data/apps \\\n` +
+      `       -v ${state.projectName}_backups:/backups:ro \\\n` +
+      `       alpine tar -xzf /backups/${stamp}/files.tar.gz -C /\n\n` +
+      `  4. docker compose start backend`
   );
-  p.outro("Follow the steps above in order.");
+  p.outro("Follow steps 1 to 4 above in order.");
 }
