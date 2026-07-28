@@ -4,10 +4,24 @@
 import { readFileSync } from "node:fs";
 
 const pkg = JSON.parse(readFileSync("package.json", "utf8")).version;
-const tagArg = process.argv[process.argv.indexOf("--tag") + 1];
-const tag = tagArg?.startsWith("v") ? tagArg.slice(1) : tagArg;
 
-if (tag && tag !== pkg) {
+// Fail loudly rather than open. This script is the only gate before an
+// irreversible `npm publish`, so a missing or blank --tag must not sail
+// through: `if (tag && ...)` would silently pass on an empty value, and an
+// absent --tag makes indexOf return -1, which reads argv[0] (the node binary).
+const i = process.argv.indexOf("--tag");
+if (i === -1) {
+  console.error("check-version-sync: --tag is required");
+  process.exit(1);
+}
+const tagArg = process.argv[i + 1];
+if (!tagArg) {
+  console.error("check-version-sync: --tag was given no value");
+  process.exit(1);
+}
+const tag = tagArg.startsWith("v") ? tagArg.slice(1) : tagArg;
+
+if (tag !== pkg) {
   console.error(`tag ${tagArg} does not match package.json version ${pkg}`);
   process.exit(1);
 }
