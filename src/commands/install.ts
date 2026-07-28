@@ -133,8 +133,11 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
     p.cancel(
       `${dir} already contains files this install would overwrite:\n` +
         present.map((f) => `  - ${f}`).join("\n") +
-        `\n  Install into an empty directory instead (\`--dir ./cortex\`), or move ` +
-        `these files aside first.\n  Nothing was written.`
+        `\n\n  Point --dir at an empty directory, or move these files aside first.\n` +
+        `  If this is the leftover of an install that failed part-way through — there\n` +
+        `  is no cortex.json, so nothing here is a working install — check whether\n` +
+        `  .env holds a NEO4J_PASSWORD you still need, then remove the directory and\n` +
+        `  re-run.\n\n  Nothing was written.`
     );
     process.exit(1);
   }
