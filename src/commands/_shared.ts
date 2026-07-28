@@ -44,3 +44,17 @@ export function formatStatusTable(rows: ServiceStatus[], state: InstallState): s
     return `${r.service.padEnd(width)}  ${status.padEnd(9)}  ${url ?? ""}`.trimEnd();
   });
 }
+
+/**
+ * Strips a secret out of arbitrary text before it is displayed. `doctor`'s
+ * closing line explicitly invites the user to paste its output when asking
+ * for help, so a provider's raw error text must never carry the configured
+ * API key forward — even though the key is sent only as an Authorization
+ * header, Cortex supports arbitrary OpenAI-compatible endpoints, and some
+ * self-hosted gateways echo request/auth detail back in verbose errors.
+ * split/join matches the secret literally, so there is no need to escape
+ * regex metacharacters that might appear in it (as a regex .replace would).
+ */
+export function redactSecret(text: string, secret?: string): string {
+  return secret ? text.split(secret).join("***") : text;
+}

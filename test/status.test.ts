@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { formatStatusTable, serviceUrl } from "../src/commands/_shared.js";
+import { formatStatusTable, serviceUrl, redactSecret } from "../src/commands/_shared.js";
 import type { InstallState } from "../src/state.js";
 
 const state: InstallState = {
@@ -43,4 +43,18 @@ test("domain URLs use https and the configured domains", () => {
 
 test("services with no user-facing URL return null", () => {
   assert.equal(serviceUrl(state, "backup"), null);
+});
+
+test("redactSecret replaces every occurrence of the secret with ***", () => {
+  const fakeKey = "sk-test-FAKESECRET000000000000000000";
+  const body = `error: invalid request, saw header Authorization: Bearer ${fakeKey} (echoed twice: ${fakeKey})`;
+  const redacted = redactSecret(body, fakeKey);
+  assert.doesNotMatch(redacted, new RegExp(fakeKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(redacted, /\*\*\*/);
+  assert.equal(redacted.split("***").length - 1, 2);
+});
+
+test("redactSecret returns text unchanged when no secret is configured", () => {
+  assert.equal(redactSecret("plain error text", undefined), "plain error text");
+  assert.equal(redactSecret("plain error text", ""), "plain error text");
 });
