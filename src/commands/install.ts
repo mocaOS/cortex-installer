@@ -63,19 +63,6 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
   // --- write, then start --------------------------------------------------
   mkdirSync(dir, { recursive: true });
 
-  // `docker compose --project-directory` (composeArgs) only governs bind-mount
-  // and .env resolution — it does NOT change where Compose looks for the files
-  // named in COMPOSE_FILE (read from that .env). Those are resolved against
-  // the process's cwd. Without this chdir, `pull`/`up`/`ps` in docker.ts stat
-  // "<cwd>/docker-compose.ports.yml" instead of "<dir>/docker-compose.ports.yml"
-  // — which fails outright, or worse, silently matches an unrelated compose
-  // file if cwd happens to contain one (confirmed against the real `docker
-  // compose` binary: this is not hypothetical). This is the only place that
-  // can fix it without changing docker.ts's signatures, and it is safe here:
-  // every path used above this line is already absolute, and nothing below
-  // it depends on the pre-install cwd.
-  process.chdir(dir);
-
   s.start("Fetching release artifacts");
   await fetchArtifacts({ version: stack.stack, dir });
   s.stop("Release artifacts in place");

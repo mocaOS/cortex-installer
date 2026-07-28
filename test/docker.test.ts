@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { composeArgs, parsePullProgress, parseHealth, ServiceStatus } from "../src/docker.js";
 
-test("composeArgs pins the project directory so cwd does not matter", () => {
+test("composeArgs pins the project directory (cwd independence additionally requires cwd: dir on the child process — see run/pull/logs)", () => {
   const a = composeArgs("/opt/cortex");
   assert.deepEqual(a.slice(0, 3), ["compose", "--project-directory", "/opt/cortex"]);
 });

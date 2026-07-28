@@ -10,8 +10,22 @@ export interface ServiceStatus {
 }
 
 /**
- * --project-directory makes every verb independent of the caller's cwd.
- * COMPOSE_FILE in the install's .env selects the overlays, so no -f is needed.
+ * --project-directory pins the project's *identity* (so e.g. `ps` finds this
+ * project's containers by label regardless of cwd) and where bind-mount
+ * paths and the .env file are read from. COMPOSE_FILE in that .env then
+ * selects the overlays, so no -f is needed.
+ *
+ * It does NOT make the filenames listed in COMPOSE_FILE resolve against
+ * `dir` — Compose still resolves those relative paths against the *calling
+ * process's* cwd, not --project-directory. Confirmed against the real
+ * `docker compose` binary: `--project-directory /x/y config`, run with cwd
+ * `/tmp`, fails with `stat /tmp/docker-compose.yml: no such file or
+ * directory` even though `/x/y/.env` sets `COMPOSE_FILE=docker-compose.yml:
+ * ...`. (`ps` alone doesn't show this — it lists containers by label and
+ * never needs to resolve the compose files at all, which is why the gap hid
+ * during earlier testing.) Every call site below therefore also passes
+ * `cwd: dir` to the child process — that option is what actually makes cwd
+ * not matter, not this flag by itself.
  */
 export function composeArgs(dir: string): string[] {
   return ["compose", "--project-directory", dir];
@@ -56,8 +70,13 @@ export function parseHealth(psJson: string): ServiceStatus[] {
 async function run(dir: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
   // docker compose ps writes to stderr even on success (e.g. "variable is not set" warnings).
   // Return them separately so parseHealth can ignore stderr chatter.
+  //
+  // cwd: dir is load-bearing, not cosmetic — see composeArgs' comment.
+  // --project-directory alone does not resolve COMPOSE_FILE's relative
+  // filenames against `dir`; only running the child process from `dir` does.
   return exec("docker", [...composeArgs(dir), ...args], {
     maxBuffer: 32 * 1024 * 1024,
+    cwd: dir,
   });
 }
 
@@ -67,7 +86,11 @@ export function pull(
   onProgress: (p: { image: string; done: boolean }) => void
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn("docker", [...composeArgs(dir), "pull"], { stdio: ["ignore", "pipe", "pipe"] });
+    // cwd: dir — see composeArgs' comment; --project-directory is not enough.
+    const child = spawn("docker", [...composeArgs(dir), "pull"], {
+      stdio: ["ignore", "pipe", "pipe"],
+      cwd: dir,
+    });
     const handle = (buf: Buffer) => {
       for (const line of buf.toString().split("\n")) {
         const p = parsePullProgress(line);
@@ -107,7 +130,8 @@ export function logs(dir: string, service?: string): Promise<number> {
   return new Promise((resolve) => {
     const args = [...composeArgs(dir), "logs", "-f", "--tail", "200"];
     if (service) args.push(service);
-    const child = spawn("docker", args, { stdio: "inherit" });
+    // cwd: dir — see composeArgs' comment; --project-directory is not enough.
+    const child = spawn("docker", args, { stdio: "inherit", cwd: dir });
     child.on("close", (code) => resolve(code ?? 0));
   });
 }
