@@ -62,3 +62,18 @@ test("parseHealth degrades gracefully when NDJSON is followed by stderr", () => 
     { service: "chat", state: "running", health: null },
   ]);
 });
+
+test("parseHealth spreads arrays found in per-line parsing, not phantom rows", () => {
+  // When array + stderr is handed to the per-line parser, the first line is the full array.
+  // It must be spread into rows, not pushed as a single phantom row with no Service field.
+  const arrayWithStderr = `${JSON.stringify([
+    { Service: "neo4j", State: "running", Health: "healthy" },
+    { Service: "chat", State: "running", Health: "" },
+  ])}\nunexpected stderr warning`;
+  const result = parseHealth(arrayWithStderr);
+  assert.equal(result.length, 2, "must extract 2 services, not 1 phantom row");
+  assert.deepEqual(result, [
+    { service: "neo4j", state: "running", health: "healthy" },
+    { service: "chat", state: "running", health: null },
+  ]);
+});

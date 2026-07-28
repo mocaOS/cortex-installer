@@ -37,7 +37,12 @@ export function parseHealth(psJson: string): ServiceStatus[] {
     for (const line of text.split("\n")) {
       const t = line.trim();
       if (!t) continue;
-      try { rows.push(JSON.parse(t)); } catch { /* skip unparseable line */ }
+      try {
+        const parsed = JSON.parse(t);
+        // If the line is itself an array, spread it; otherwise push the object.
+        if (Array.isArray(parsed)) rows.push(...parsed);
+        else rows.push(parsed);
+      } catch { /* skip unparseable line */ }
     }
   }
 
