@@ -7,14 +7,34 @@ test("composeArgs pins the project directory (cwd independence additionally requ
   assert.deepEqual(a.slice(0, 3), ["compose", "--project-directory", "/opt/cortex"]);
 });
 
-test("parsePullProgress recognises a completed pull line", () => {
+test("parsePullProgress recognises a completed pull line (bare two-token form, older Compose)", () => {
   const r = parsePullProgress(" backend Pulled ");
   assert.deepEqual(r, { image: "backend", done: true });
 });
 
-test("parsePullProgress recognises an in-flight pull line", () => {
+test("parsePullProgress recognises an in-flight pull line (bare two-token form, older Compose)", () => {
   const r = parsePullProgress(" neo4j Pulling ");
   assert.deepEqual(r, { image: "neo4j", done: false });
+});
+
+// Real docker compose v5.1.3 output is three tokens: "Image <ref> <state>".
+test("parsePullProgress recognises the real three-token completed-pull line", () => {
+  const r = parsePullProgress(" Image ghcr.io/mocaos/cortex-chat:1.0.0 Pulled");
+  assert.deepEqual(r, { image: "ghcr.io/mocaos/cortex-chat:1.0.0", done: true });
+});
+
+test("parsePullProgress recognises the real three-token in-flight line", () => {
+  const r = parsePullProgress(" Image ghcr.io/mocaos/cortex-chat:1.0.0 Pulling");
+  assert.deepEqual(r, { image: "ghcr.io/mocaos/cortex-chat:1.0.0", done: false });
+});
+
+test("parsePullProgress recognises a second real completed-pull line (neo4j)", () => {
+  const r = parsePullProgress(" Image neo4j:5.26-community Pulled");
+  assert.deepEqual(r, { image: "neo4j:5.26-community", done: true });
+});
+
+test("parsePullProgress ignores a Skipped line (buildable services like backup emit this, not Pulled/Pulling)", () => {
+  assert.equal(parsePullProgress(" backup Skipped No image to be pulled"), null);
 });
 
 test("parsePullProgress ignores layer chatter", () => {
