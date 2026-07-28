@@ -201,3 +201,50 @@ test("valid port overrides are still honoured", () => {
   assert.equal(cfg.ports.app, 8080);
   assert.equal(cfg.ports.chat, 3001, "unset ports keep their defaults");
 });
+
+// --- provider / base URL resolution -----------------------------------------
+// The README's documented --yes example sets an OpenAI key and an OpenAI model
+// and NO base URL. Provider "other" declares baseUrl: "" (empty string, not
+// undefined), so the old `?? "https://api.openai.com/v1"` never fired and the
+// documented example produced baseUrl "" — dying in the probe with "Failed to
+// parse URL from /chat/completions", which names no variable at all.
+test("the README's documented --yes example resolves to OpenAI, not an empty URL", () => {
+  const cfg = buildConfigNonInteractive(MINIMAL, stack, "/tmp/c");
+  assert.equal(cfg.llm.baseUrl, "https://api.openai.com/v1");
+});
+
+test("an explicit CORTEX_OPENAI_API_BASE wins over the provider default", () => {
+  const cfg = buildConfigNonInteractive(
+    { ...MINIMAL, CORTEX_PROVIDER: "openai", CORTEX_OPENAI_API_BASE: "https://llm.example.com/v1" },
+    stack, "/tmp/c"
+  );
+  assert.equal(cfg.llm.baseUrl, "https://llm.example.com/v1");
+});
+
+test("a known provider supplies its own base URL", () => {
+  const cfg = buildConfigNonInteractive({ ...MINIMAL, CORTEX_PROVIDER: "venice" }, stack, "/tmp/c");
+  assert.equal(cfg.llm.baseUrl, "https://api.venice.ai/api/v1");
+  assert.equal(cfg.llm.providerId, "venice");
+});
+
+// A typo'd provider previously fell back to OpenAI silently, which would have
+// sent a Venice key to api.openai.com — the wrong vendor entirely.
+test("a misspelled CORTEX_PROVIDER is rejected, not silently switched to OpenAI", () => {
+  assert.throws(
+    () => buildConfigNonInteractive({ ...MINIMAL, CORTEX_PROVIDER: "vencie" }, stack, "/tmp/c"),
+    (err: unknown) => {
+      const m = (err as Error).message;
+      assert.match(m, /CORTEX_PROVIDER/);
+      assert.match(m, /vencie/);
+      assert.match(m, /venice/, "must list the valid ids");
+      return true;
+    }
+  );
+});
+
+test("rejects a base URL that is not http(s)", () => {
+  assert.throws(
+    () => buildConfigNonInteractive({ ...MINIMAL, CORTEX_OPENAI_API_BASE: "llm.example.com/v1" }, stack, "/tmp/c"),
+    /CORTEX_OPENAI_API_BASE/
+  );
+});

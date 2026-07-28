@@ -116,6 +116,35 @@ export function buildConfigNonInteractive(
     domains = { app, chat, acmeEmail };
   }
 
+  /**
+   * An unrecognised CORTEX_PROVIDER used to be swallowed: providerById returned
+   * undefined, `provider?.id ?? "other"` quietly became "other", and the base URL
+   * then fell through to OpenAI's. So `CORTEX_PROVIDER=vencie` (a plausible typo
+   * for venice) sent the operator's VENICE key to api.openai.com — a wrong-vendor
+   * credential disclosure, reported as nothing at all. Name the valid ids instead.
+   */
+  const provider = providerById(env.CORTEX_PROVIDER ?? "other");
+  if (env.CORTEX_PROVIDER !== undefined && provider === undefined) {
+    invalid.push(
+      `CORTEX_PROVIDER="${env.CORTEX_PROVIDER}" — must be one of ` +
+        `${PROVIDERS.map((pr) => pr.id).join(", ")}`
+    );
+  }
+
+  /**
+   * `||`, not `??`. Provider "other" declares `baseUrl: ""` — an empty string,
+   * not undefined — so `??` stopped there and the intended
+   * "https://api.openai.com/v1" fallback was unreachable dead code. The result:
+   * the README's own documented --yes example (an OpenAI key and an OpenAI model,
+   * no CORTEX_OPENAI_API_BASE) produced baseUrl "" and died in the probe with
+   * `Request failed: Failed to parse URL from /chat/completions`, which names no
+   * variable and points at nothing. Verified before the fix.
+   */
+  const baseUrl = env.CORTEX_OPENAI_API_BASE || provider?.baseUrl || "https://api.openai.com/v1";
+  if (!/^https?:\/\//.test(baseUrl)) {
+    invalid.push(`CORTEX_OPENAI_API_BASE="${baseUrl}" — must start with http:// or https://`);
+  }
+
   if (missing.length || invalid.length) {
     const parts: string[] = [];
     if (missing.length) {
@@ -147,7 +176,6 @@ export function buildConfigNonInteractive(
     secrets[key] = value;
   }
 
-  const provider = providerById(env.CORTEX_PROVIDER ?? "other");
   return {
     mode,
     dir,
@@ -157,7 +185,7 @@ export function buildConfigNonInteractive(
     adminEmail,
     llm: {
       providerId: provider?.id ?? "other",
-      baseUrl: env.CORTEX_OPENAI_API_BASE ?? provider?.baseUrl ?? "https://api.openai.com/v1",
+      baseUrl,
       apiKey,
       chatModel,
       embeddingModel,
