@@ -53,6 +53,41 @@ export function checkPort(port: number, host = "127.0.0.1"): Promise<boolean> {
   });
 }
 
+/**
+ * Docker volumes are named `<project>_<volume>` and belong to the daemon as a
+ * whole — they are NOT scoped to any install directory, and `docker volume
+ * ls` lists every project's volumes, from every install anyone has ever run
+ * on this machine, forever (until explicitly removed).
+ *
+ * This matters because Neo4j only reads NEO4J_AUTH — the env var Compose
+ * populates from NEO4J_PASSWORD — the FIRST time its data volume is created.
+ * If a volume named `<project>_neo4j_data` already exists (e.g. from a
+ * previous install that reused the default project name "cortex", or from
+ * once running the app's own dev docker-compose.yml locally), a fresh install
+ * that picks the same project name writes a newly generated NEO4J_PASSWORD to
+ * .env that Neo4j will never apply — the existing volume keeps whatever
+ * credentials it was created with. The backend's driver then retries the
+ * (wrong, freshly generated) password until Neo4j locks it out, which
+ * surfaces only as:
+ *
+ *   neo4j.exceptions.ClientError: {neo4j_code: Neo.ClientError.Security.AuthenticationRateLimit}
+ *
+ * in the backend's own logs — a symptom that gives no hint that the real
+ * cause is a project-name collision with unrelated, pre-existing data. Since
+ * that data might be a real user's graph, uploads or chat history, the fix is
+ * to detect the collision and let the wizard offer a different project name
+ * — never to delete or overwrite it.
+ */
+export function filterProjectVolumes(names: string[], projectName: string): string[] {
+  const prefix = `${projectName}_`;
+  return names.map((n) => n.trim()).filter((n) => n.length > 0 && n.startsWith(prefix));
+}
+
+export async function existingProjectVolumes(projectName: string): Promise<string[]> {
+  const out = await tryExec("docker", ["volume", "ls", "--format", "{{.Name}}"]);
+  return filterProjectVolumes(out.output.split("\n"), projectName);
+}
+
 async function tryExec(cmd: string, args: string[]): Promise<{ output: string; notFound: boolean }> {
   try {
     const { stdout, stderr } = await exec(cmd, args);

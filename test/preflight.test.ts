@@ -1,7 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
-import { parseDockerVersion, parseComposeVersion, checkArch, checkPort } from "../src/preflight.js";
+import {
+  parseDockerVersion,
+  parseComposeVersion,
+  checkArch,
+  checkPort,
+  filterProjectVolumes,
+} from "../src/preflight.js";
 
 test("parses `docker version --format` output", () => {
   assert.equal(parseDockerVersion("27.3.1\n"), "27.3.1");
@@ -50,4 +56,35 @@ test("checkPort reports a bound port as taken", async () => {
   } finally {
     await new Promise<void>((res) => srv.close(() => res()));
   }
+});
+
+// filterProjectVolumes is the pure part of existingProjectVolumes, factored
+// out so this can be tested without depending on this machine's real Docker
+// volumes (which will differ, and may legitimately be empty, on any given
+// test runner).
+test("filterProjectVolumes matches a volume that belongs to the project", () => {
+  const names = ["cortex_neo4j_data", "cortex_uploads_data"];
+  assert.deepEqual(filterProjectVolumes(names, "cortex"), names);
+});
+
+test("filterProjectVolumes rejects a name that merely shares a prefix", () => {
+  // "cortexfoo_data" is NOT project "cortex" — the underscore boundary matters.
+  assert.deepEqual(filterProjectVolumes(["cortexfoo_data"], "cortex"), []);
+});
+
+test("filterProjectVolumes ignores unrelated projects", () => {
+  assert.deepEqual(
+    filterProjectVolumes(["meta-cortex_database-data", "other_data"], "cortex"),
+    []
+  );
+});
+
+test("filterProjectVolumes trims whitespace from `docker volume ls` output lines", () => {
+  assert.deepEqual(filterProjectVolumes(["  cortex_neo4j_data  ", ""], "cortex"), [
+    "cortex_neo4j_data",
+  ]);
+});
+
+test("filterProjectVolumes returns nothing for a project with no existing volumes", () => {
+  assert.deepEqual(filterProjectVolumes(["unrelated_data"], "cortex-e2e"), []);
 });
