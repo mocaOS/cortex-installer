@@ -1,0 +1,16 @@
+{
+  // Type-checks the TESTS, which the emit config cannot.
+  //
+  // tsconfig.json must keep `include: ["src/**/*.ts"]` so that rootDir stays
+  // src/ and `tsc` emits dist/cli.js rather than dist/src/cli.js. The
+  // consequence was that `tsc --noEmit` never looked at test/ at all: a test
+  // could call a function with the wrong argument types, or assert against a
+  // field that no longer exists, and CI stayed green. noEmit means there is no
+  // rootDir constraint here, so this config can safely span both directories.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

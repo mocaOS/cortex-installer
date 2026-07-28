@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseArgs } from "../src/cli.js";
+// ../src/args.js, not ../src/cli.js: cli.ts is the bin entry point and runs
+// main() unconditionally, so importing it here would execute the CLI. Keeping
+// the parser in its own module is what lets cli.ts drop the argv[1] guard that
+// silently broke every symlinked `node_modules/.bin/cortex` invocation.
+import { parseArgs } from "../src/args.js";
 
 test("defaults to the install verb", () => {
   const r = parseArgs([]);

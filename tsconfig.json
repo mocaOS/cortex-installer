@@ -7,8 +7,16 @@
     "rootDir": "src",
     "strict": true,
     "declaration": false,
-    "sourceMap": true,
+    // Off deliberately. `files: ["dist"]` in package.json publishes dist/ but
+    // NOT src/, so every emitted .js.map pointed at sources that are not in the
+    // tarball — dead maps that no debugger can resolve, for ~30% of dist's
+    // bytes. Stack traces from the shipped CLI are plain compiled JS either way.
+    "sourceMap": false,
     "skipLibCheck": true
   },
+  // src only: rootDir must stay src/ for the emit build to lay dist/ out flat.
+  // Widening this to include test/ would push rootDir up to the repo root and
+  // emit dist/src + dist/test, breaking the "bin": "dist/cli.js" path. Tests
+  // are type-checked by tsconfig.test.json instead (used by `npm test`).
   "include": ["src/**/*.ts"]
 }

@@ -34,3 +34,43 @@ jobs:
       - run: npm run build
       - name: The built CLI must at least run
         run: node dist/cli.js --version
+
+      # Everything above invokes the CLI as `node <path>/cli.js`. That form is
+      # NOT how anyone actually runs the published package, and it hid a bug
+      # that made the shipped binary a no-op: npm links a bin as a symlink
+      # (node_modules/.bin/cortex -> ../@mocaos/cortex/dist/cli.js), so
+      # process.argv[1] is the SYMLINK path. cli.ts guarded main() behind
+      # `argv[1].endsWith("cli.js")`, which is false for the symlink — the
+      # binary exited 0 and printed nothing, on every POSIX install, while
+      # `node dist/cli.js --version` kept working. Pack, install and run the
+      # real tarball through the real shim so that class of bug cannot ship.
+      - name: The packed tarball's bin must work through npm's symlink shim
+        run: |
+          set -euo pipefail
+          expected="$(node -p 'require("./package.json").version')"
+          mkdir -p /tmp/pack
+          npm pack --pack-destination /tmp/pack
+          tarball="$(ls /tmp/pack/*.tgz | head -1)"
+
+          work="$(mktemp -d)"
+          cd "$work"
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund --loglevel error "$tarball"
+
+          # Must be the .bin symlink, never `node .../dist/cli.js`.
+          test -L ./node_modules/.bin/cortex
+
+          got="$(./node_modules/.bin/cortex --version)"
+          echo "symlink --version -> '$got' (expected '$expected')"
+          test "$got" = "$expected"
+
+          ./node_modules/.bin/cortex --help | grep -q 'installer and manager for self-hosted Cortex'
+          echo "symlink --help OK"
+
+          # An unknown verb must still reach the error path (exit 1, message),
+          # proving main() runs and rejects rather than silently doing nothing.
+          if ./node_modules/.bin/cortex definitely-not-a-verb > out.txt 2>&1; then
+            echo "expected a non-zero exit for an unknown verb"; cat out.txt; exit 1
+          fi
+          grep -q 'definitely-not-a-verb' out.txt
+          echo "symlink unknown-verb OK"
