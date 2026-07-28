@@ -10,7 +10,14 @@ export async function run(ctx: {
   banner(installerVersion());
   const { dir, state } = resolveInstall(ctx.flags);
 
-  const listing = await execIn(dir, "backup", ["sh", "-c", "ls -1 /backups | grep -v LAST_SUCCESS || true"]);
+  // Exclude LAST_SUCCESS and the `latest` symlink backup.sh maintains — the
+  // latter would otherwise appear as a selectable entry that sorts ahead of
+  // every real timestamp, duplicating whichever backup it points at.
+  const listing = await execIn(dir, "backup", [
+    "sh",
+    "-c",
+    "ls -1 /backups | grep -vE '^(LAST_SUCCESS|latest)$' || true",
+  ]);
   const stamps = listing.trim().split("\n").filter(Boolean);
   if (!stamps.length) { p.cancel("No backups found."); return; }
 

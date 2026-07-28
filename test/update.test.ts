@@ -51,3 +51,22 @@ test("does not touch a secret that happens to contain an image-like string", () 
   const out = rewriteImagePins(env, { ...from, backend: "2.0.0" });
   assert.match(out, /^ADMIN_API_KEY=cortex_admin_deadbeef$/m);
 });
+
+test("rewrites an indented pin line instead of silently skipping it", () => {
+  const env = "  CORTEX_BACKEND_IMAGE=ghcr.io/mocaos/cortex-backend:1.0.0\n";
+  const out = rewriteImagePins(env, { ...from, backend: "2.0.0" });
+  assert.match(out, /CORTEX_BACKEND_IMAGE=ghcr\.io\/mocaos\/cortex-backend:2\.0\.0/);
+});
+
+test("preserves CRLF line endings on a rewritten pin line", () => {
+  const env = "CORTEX_BACKEND_IMAGE=ghcr.io/mocaos/cortex-backend:1.0.0\r\nMY_CUSTOM_TWEAK=keep-me\r\n";
+  const out = rewriteImagePins(env, { ...from, backend: "2.0.0" });
+  assert.match(out, /^CORTEX_BACKEND_IMAGE=ghcr\.io\/mocaos\/cortex-backend:2\.0\.0\r$/m);
+  assert.match(out, /^MY_CUSTOM_TWEAK=keep-me\r$/m);
+});
+
+test("leaves a near-miss key alone instead of matching it as a prefix", () => {
+  const env = "CORTEX_BACKEND_IMAGE_X=something-unrelated\n";
+  const out = rewriteImagePins(env, { ...from, backend: "2.0.0" });
+  assert.match(out, /^CORTEX_BACKEND_IMAGE_X=something-unrelated$/m);
+});

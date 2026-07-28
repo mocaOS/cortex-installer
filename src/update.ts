@@ -33,9 +33,14 @@ export function rewriteImagePins(envText: string, components: Components): strin
     .map((line) => {
       const eq = line.indexOf("=");
       if (eq <= 0 || line.trimStart().startsWith("#")) return line;
-      const key = line.slice(0, eq);
+      // Trim the key so an indented pin line is still matched rather than
+      // silently skipped, and preserve a CRLF terminator so an update does not
+      // leave LF pin lines mixed into an otherwise CRLF file.
+      const key = line.slice(0, eq).trim();
       const build = IMAGE_LINES[key];
-      return build ? `${key}=${build(components)}` : line;
+      if (!build) return line;
+      const eol = line.endsWith("\r") ? "\r" : "";
+      return `${key}=${build(components)}${eol}`;
     })
     .join("\n");
 }

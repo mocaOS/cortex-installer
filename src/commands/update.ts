@@ -81,10 +81,22 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
   });
 
   if (!ok) {
+    // Point at cortex.json rather than describing values inline. The pin set is
+    // five keys, and neo4j/caddy do NOT use the stack's semver (they are e.g.
+    // 5.26-community and 2-alpine) — so "set the CORTEX_*_IMAGE lines to
+    // <stack>" is both incomplete and wrong for the two most likely to have
+    // caused a health failure. `state` here is still the pre-update state:
+    // writeState above wrote a new object to disk but never reassigned this
+    // binding, so state.components are genuinely the previous pins.
+    const prev = state.components;
     p.log.error(
-      `Health check timed out. Previous pins are recorded in cortex.json.\n` +
-        `  To roll back: edit the CORTEX_*_IMAGE lines in .env back to ${state.stack}, ` +
-        `then run \`cortex start\`.`
+      `Health check timed out. Roll back by restoring these five lines in .env ` +
+        `(also recorded as \`previous\` in cortex.json), then \`cortex start\`:\n` +
+        `  CORTEX_BACKEND_IMAGE=ghcr.io/mocaos/cortex-backend:${prev.backend}\n` +
+        `  CORTEX_FRONTEND_IMAGE=ghcr.io/mocaos/cortex-frontend:${prev.frontend}\n` +
+        `  CORTEX_CHAT_IMAGE=ghcr.io/mocaos/cortex-chat:${prev.chat}\n` +
+        `  NEO4J_VERSION=${prev.neo4j}\n` +
+        `  CADDY_VERSION=${prev.caddy}`
     );
   }
   p.outro(ok ? `Now on Cortex ${latest.stack}.` : "Update finished with warnings.");
