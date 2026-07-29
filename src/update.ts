@@ -44,3 +44,34 @@ export function rewriteImagePins(envText: string, components: Components): strin
     })
     .join("\n");
 }
+
+/**
+ * Sets or clears `COMPOSE_PROFILES=chat` in .env text, leaving every other line
+ * byte-identical.
+ *
+ * Enabling prefers uncommenting the commented form the installer writes, so the
+ * surrounding explanatory comment stays where it is and the line does not appear
+ * twice. Disabling comments the line rather than deleting it, so the operator can
+ * see what was turned off.
+ */
+export function ensureChatProfile(envText: string, enabled: boolean): string {
+  const lines = envText.split("\n");
+  const active = lines.findIndex((l) => /^\s*COMPOSE_PROFILES\s*=/.test(l));
+  const commented = lines.findIndex((l) => /^\s*#\s*COMPOSE_PROFILES\s*=\s*chat\s*$/.test(l));
+
+  if (enabled) {
+    if (active !== -1) {
+      lines[active] = "COMPOSE_PROFILES=chat";
+    } else if (commented !== -1) {
+      lines[commented] = "COMPOSE_PROFILES=chat";
+    } else {
+      // Prepend rather than append: COMPOSE_* belongs with the mode block, and a
+      // trailing line after the secrets reads like an afterthought.
+      lines.unshift("COMPOSE_PROFILES=chat");
+    }
+    return lines.join("\n");
+  }
+
+  if (active !== -1) lines[active] = "# COMPOSE_PROFILES=chat";
+  return lines.join("\n");
+}

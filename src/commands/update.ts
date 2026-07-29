@@ -7,7 +7,7 @@ import { fetchStack, assertInstallerSupported } from "../stack.js";
 import { fetchArtifacts } from "../artifacts.js";
 import { writeState, chatEnabledFor } from "../state.js";
 import { pull, up, waitHealthy, healthServices, execIn } from "../docker.js";
-import { diffComponents, rewriteImagePins } from "../update.js";
+import { diffComponents, rewriteImagePins, ensureChatProfile } from "../update.js";
 import { resolveInstall } from "./_shared.js";
 
 export async function run(ctx: { flags: Record<string, string | boolean> }): Promise<void> {
@@ -51,20 +51,29 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
   }
 
   // Refresh compose files + ops/ from the new tag, then repin .env.
-  //
-  // chatEnabledFor(state) for now — this is the PRE-update state, so on an
-  // install that predates the chat option it reads absent-as-enabled, which is
-  // correct today. Task 9 replaces this with the value update back-fills into
-  // the new state, once back-filling exists.
+  /**
+   * Every install that predates the chat option was running chat, so an absent
+   * state.chat means enabled. Without this, applying a stack whose compose puts
+   * chat behind a profile would silently drop a running service: the data would
+   * survive in chat_data, the container would not, and nothing would say why.
+   */
+  const chat = chatEnabledFor(state);
+  if (state.chat === undefined) {
+    p.log.info("Cortex Chat stays installed. It is optional for new installs from this release on.");
+  }
   s.start("Fetching release artifacts");
-  await fetchArtifacts({ version: latest.stack, dir, chat: chatEnabledFor(state) });
+  await fetchArtifacts({ version: latest.stack, dir, chat });
   s.stop("Release artifacts updated");
 
   // Atomic: this file holds the only copy of NEO4J_PASSWORD, and a truncating
   // write that dies mid-flight makes the graph permanently unauthenticatable.
-  // See writeEnvFile.
+  // See writeEnvFile. The profile edit folds into this same write rather than
+  // adding a second one, so a crash never gets a chance to land between them.
   const envPath = join(dir, ".env");
-  writeEnvFile(envPath, rewriteImagePins(readFileSync(envPath, "utf8"), latest.components));
+  writeEnvFile(
+    envPath,
+    ensureChatProfile(rewriteImagePins(readFileSync(envPath, "utf8"), latest.components), chat)
+  );
   p.log.success("Repinned images in .env (your other settings untouched)");
 
   const pulled = new Set<string>();
@@ -80,12 +89,7 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
   // state.mode decides whether caddy is part of the stack — see healthServices.
   // An update that leaves caddy crash-looping on the new version is exactly the
   // case this must not report as healthy.
-  //
-  // chatEnabledFor(state) for now — this is the PRE-update state, so on an
-  // install that predates the chat option it reads absent-as-enabled, which is
-  // correct today. Task 9 replaces this with the value update back-fills into
-  // the new state, once back-filling exists.
-  const ok = await waitHealthy(dir, healthServices(state.mode, chatEnabledFor(state)));
+  const ok = await waitHealthy(dir, healthServices(state.mode, chat));
   s.stop(ok ? "All services healthy" : "Timed out waiting for health");
 
   writeState(dir, {
@@ -93,6 +97,7 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
     installer: version,
     stack: latest.stack,
     components: latest.components,
+    chat,
     previous: { stack: state.stack, components: state.components },
   });
 
