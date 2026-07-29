@@ -356,3 +356,52 @@ test("domain mode with chat still requires a chat domain", () => {
     /CORTEX_CHAT_DOMAIN/
   );
 });
+
+// Locally scoped on purpose — distinct from the shared `stack` fixture above,
+// which is pinned at CHAT_OPTIONAL_SINCE so the rest of this file exercises
+// the optional-chat path. This one exists only to exercise the OTHER side of
+// supportsOptionalChat: a stack older than CHAT_OPTIONAL_SINCE, whose compose
+// runs chat unconditionally and has no COMPOSE_PROFILES to omit it with.
+const preOptionalChatStack = parseStack({
+  stack: "1.0.0",
+  components: { backend: "1.0.0", frontend: "1.0.0", chat: "1.0.0", neo4j: "5.26-community", caddy: "2-alpine" },
+  minInstaller: "1.0.0",
+});
+
+test("a stack that predates the profile forces chat on regardless of CORTEX_ENABLE_CHAT", () => {
+  // Half one: nothing set, chat still reports installed.
+  assert.equal(buildConfigNonInteractive(MINIMAL, preOptionalChatStack, "/tmp/c").chat, true);
+
+  // Half two is the one that matters: an EXPLICIT request to turn chat off.
+  // On this stack the compose has no chat profile at all, so there is no
+  // COMPOSE_PROFILES value that would actually stop the chat container from
+  // starting — writing "chat: false" here would tell the operator chat is
+  // off while it keeps running right next to the app they installed. Reporting
+  // it as installed, contrary to what they asked for, is the honest answer;
+  // the alternative is a silent lie about what is running on their host.
+  assert.equal(
+    buildConfigNonInteractive({ ...MINIMAL, CORTEX_ENABLE_CHAT: "false" }, preOptionalChatStack, "/tmp/c").chat,
+    true,
+    "an explicit request to disable chat cannot be honoured on a stack whose compose runs it unconditionally"
+  );
+});
+
+test("a stack that predates the profile requires a chat domain in domain mode even without an explicit CORTEX_ENABLE_CHAT", () => {
+  // Chat is forced on for this stack (see above), so domain mode must still
+  // demand CORTEX_CHAT_DOMAIN even though CORTEX_ENABLE_CHAT was never set —
+  // the same "chat is really running" fact applies to the domain question too.
+  assert.throws(
+    () =>
+      buildConfigNonInteractive(
+        {
+          ...MINIMAL,
+          CORTEX_MODE: "domain",
+          CORTEX_APP_DOMAIN: "a.example.com",
+          CORTEX_ACME_EMAIL: "o@example.com",
+        },
+        preOptionalChatStack,
+        "/tmp/c"
+      ),
+    /CORTEX_CHAT_DOMAIN/
+  );
+});
