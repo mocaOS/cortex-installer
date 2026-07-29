@@ -32,6 +32,8 @@ async function probeLlmOrExit(
     embeddingModel: string;
     embeddingDimension: number;
     embeddingSendDimensions: boolean;
+    embeddingBaseUrl?: string;
+    embeddingApiKey?: string;
   },
   s: Spinner
 ): Promise<void> {
@@ -47,8 +49,15 @@ async function probeLlmOrExit(
   }
   s.stop(`Chat completion OK (${chatProbe.ms} ms)`);
 
+  // Against the embedding endpoint when one was given, not the chat one — a
+  // separate provider that is collected and then probed at the wrong host both
+  // reports a false failure and sends its credential to the wrong vendor.
   s.start("Testing embeddings");
-  const embedProbe = await probeEmbedding({ baseUrl: llm.baseUrl, apiKey: llm.apiKey, model: llm.embeddingModel });
+  const embedProbe = await probeEmbedding({
+    baseUrl: llm.embeddingBaseUrl ?? llm.baseUrl,
+    apiKey: llm.embeddingApiKey ?? llm.apiKey,
+    model: llm.embeddingModel,
+  });
   if (!embedProbe.ok) {
     s.stop("Embedding probe failed");
     p.log.error(

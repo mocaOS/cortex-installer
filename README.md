@@ -73,6 +73,21 @@ supply `CORTEX_ADMIN_PASSWORD`, `CORTEX_NEO4J_PASSWORD`,
 `CORTEX_ADMIN_API_KEY`, `CORTEX_SESSION_SECRET` or
 `CORTEX_CHAT_ENCRYPTION_KEY`.
 
+Embeddings default to the chat provider. When they come from somewhere else —
+Groq serves chat but no embeddings, and Venice is a common embedding pairing —
+set both of:
+
+```bash
+CORTEX_EMBEDDING_API_BASE=https://api.venice.ai/api/v1
+CORTEX_EMBEDDING_API_KEY=...
+```
+
+Both or neither: a base URL on its own would send the chat provider's key to a
+different vendor, so it is rejected instead. The wizard asks the same question
+("Do embeddings come from that same provider?") and the embedding dimension is
+always taken from a live probe of whichever endpoint ends up serving them,
+never assumed.
+
 `--yes` runs the same live LLM probes as the interactive wizard — before
 `.env` exists and before any image is pulled — so a bad key fails in seconds,
 not after a multi-minute pull.

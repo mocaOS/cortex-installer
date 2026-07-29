@@ -141,8 +141,28 @@ export function buildConfigNonInteractive(
    * variable and points at nothing. Verified before the fix.
    */
   const baseUrl = env.CORTEX_OPENAI_API_BASE || provider?.baseUrl || "https://api.openai.com/v1";
+
+  // Optional, and only meaningful together: a base URL with no key would fall
+  // back to the chat provider's key against a different vendor's endpoint —
+  // silently sending one vendor's credential to another. Requiring both, or
+  // neither, keeps that impossible. (The interactive wizard always collects
+  // them as a pair for the same reason.)
+  const embeddingBaseUrl = env.CORTEX_EMBEDDING_API_BASE || undefined;
+  const embeddingApiKey = env.CORTEX_EMBEDDING_API_KEY || undefined;
+  if (Boolean(embeddingBaseUrl) !== Boolean(embeddingApiKey)) {
+    invalid.push(
+      "CORTEX_EMBEDDING_API_BASE and CORTEX_EMBEDDING_API_KEY must be set " +
+        "together — set both to use a separate embedding provider, or neither " +
+        "to embed with the chat provider"
+    );
+  }
   if (!/^https?:\/\//.test(baseUrl)) {
     invalid.push(`CORTEX_OPENAI_API_BASE="${baseUrl}" — must start with http:// or https://`);
+  }
+  if (embeddingBaseUrl !== undefined && !/^https?:\/\//.test(embeddingBaseUrl)) {
+    invalid.push(
+      `CORTEX_EMBEDDING_API_BASE="${embeddingBaseUrl}" — must start with http:// or https://`
+    );
   }
 
   if (missing.length || invalid.length) {
@@ -191,6 +211,8 @@ export function buildConfigNonInteractive(
       embeddingModel,
       embeddingDimension,
       embeddingSendDimensions: env.CORTEX_EMBEDDING_SEND_DIMENSIONS !== "false",
+      embeddingBaseUrl,
+      embeddingApiKey,
     },
     ports,
     domains,
@@ -417,11 +439,65 @@ export async function runWizard(opts: { stack: Stack; dir: string }): Promise<In
     apiKey = String(entered);
   }
 
+  /**
+   * Embeddings frequently do not come from the chat provider. Groq serves chat
+   * but no embeddings; Venice is commonly used for embeddings alongside a
+   * different chat model; Ollama users often embed elsewhere. The embedding
+   * probe below is fatal, so before this prompt existed a chat-only endpoint
+   * did not merely degrade — it aborted the install with "The embedding
+   * endpoint did not answer", leaving no way to finish. EMBEDDING_API_BASE and
+   * EMBEDDING_API_KEY were already rendered into .env and honoured by the
+   * backend; nothing had ever populated them.
+   */
+  const sameEmbeddingEndpoint = await p.confirm({
+    message: "Do embeddings come from that same provider?",
+    initialValue: true,
+  });
+  if (p.isCancel(sameEmbeddingEndpoint)) bail("Cancelled.");
+
+  let embeddingBaseUrl: string | undefined;
+  let embeddingApiKey: string | undefined;
+  if (!sameEmbeddingEndpoint) {
+    const entered = await p.text({
+      message: "Embedding base URL",
+      placeholder: "https://api.venice.ai/api/v1",
+      validate: (v) => (v?.startsWith("http") ? undefined : "Must start with http:// or https://"),
+    });
+    if (p.isCancel(entered)) bail("Cancelled.");
+    embeddingBaseUrl = String(entered);
+
+    const key = await p.password({
+      message: "Embedding API key",
+      validate: (v) => (v ? undefined : "Required"),
+    });
+    if (p.isCancel(key)) bail("Cancelled.");
+    embeddingApiKey = String(key);
+  }
+
+  // Everything embedding-related — the model list, the probe — has to use the
+  // embedding endpoint, not the chat one, or the separate provider is collected
+  // and then ignored.
+  const embedEndpoint = {
+    baseUrl: embeddingBaseUrl ?? baseUrl,
+    apiKey: embeddingApiKey ?? apiKey,
+  };
+
   // --- model selection, from the real list when available -----------------
   const s = p.spinner();
   s.start("Fetching available models");
   const models = await listModels({ baseUrl, apiKey, model: "" });
   s.stop(models.length ? `${models.length} models from ${new URL(baseUrl).host}` : "Model list unavailable — enter names manually");
+
+  let embeddingModels = models;
+  if (!sameEmbeddingEndpoint) {
+    s.start("Fetching embedding models");
+    embeddingModels = await listModels({ ...embedEndpoint, model: "" });
+    s.stop(
+      embeddingModels.length
+        ? `${embeddingModels.length} models from ${new URL(embedEndpoint.baseUrl).host}`
+        : "Model list unavailable — enter the name manually"
+    );
+  }
 
   /**
    * Falls back to free text in TWO cases, both real: the endpoint has no
@@ -434,9 +510,12 @@ export async function runWizard(opts: { stack: Stack; dir: string }): Promise<In
   const pickModel = async (
     message: string,
     filter: (m: string) => boolean,
-    placeholder: string
+    placeholder: string,
+    // Which endpoint's model list to offer. Defaults to the chat provider's;
+    // the embedding pick passes its own when a separate endpoint was given.
+    pool: string[] = models
   ): Promise<string> => {
-    const matches = models.filter(filter);
+    const matches = pool.filter(filter);
     if (matches.length) {
       const v = await p.select({
         message,
@@ -445,9 +524,9 @@ export async function runWizard(opts: { stack: Stack; dir: string }): Promise<In
       if (p.isCancel(v)) bail("Cancelled.");
       return String(v);
     }
-    if (models.length) {
+    if (pool.length) {
       p.log.info(
-        `This endpoint lists ${models.length} models but none look like a match ` +
+        `This endpoint lists ${pool.length} models but none look like a match ` +
           `for "${message.toLowerCase()}" — enter the name yourself.`
       );
     }
@@ -468,7 +547,8 @@ export async function runWizard(opts: { stack: Stack; dir: string }): Promise<In
   const embeddingModel = await pickModel(
     "Embedding model",
     (m) => /embed/i.test(m),
-    "text-embedding-3-small"
+    "text-embedding-3-small",
+    embeddingModels
   );
 
   // --- probes: nothing is written until these pass -------------------------
@@ -484,7 +564,7 @@ export async function runWizard(opts: { stack: Stack; dir: string }): Promise<In
   s.stop(`Chat completion OK (${chatProbe.ms} ms)`);
 
   s.start("Testing embeddings");
-  const embedProbe = await probeEmbedding({ baseUrl, apiKey, model: embeddingModel });
+  const embedProbe = await probeEmbedding({ ...embedEndpoint, model: embeddingModel });
   if (!embedProbe.ok) {
     s.stop("Embedding probe failed");
     p.log.error(
@@ -578,6 +658,8 @@ export async function runWizard(opts: { stack: Stack; dir: string }): Promise<In
       embeddingModel,
       embeddingDimension: embedProbe.dimension,
       embeddingSendDimensions: embedProbe.sendDimensions,
+      embeddingBaseUrl,
+      embeddingApiKey,
     },
     // Only localhost mode publishes ports, so only it needs conflict resolution.
     ports: mode === "localhost" ? await resolvePorts() : DEFAULT_PORTS,

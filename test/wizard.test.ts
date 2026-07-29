@@ -248,3 +248,62 @@ test("rejects a base URL that is not http(s)", () => {
     /CORTEX_OPENAI_API_BASE/
   );
 });
+
+test("a separate embedding provider is carried through to the config", () => {
+  const cfg = buildConfigNonInteractive(
+    {
+      ...MINIMAL,
+      CORTEX_EMBEDDING_API_BASE: "https://api.venice.ai/api/v1",
+      CORTEX_EMBEDDING_API_KEY: "venice-key",
+    },
+    stack,
+    "/tmp/c"
+  );
+  assert.equal(cfg.llm.embeddingBaseUrl, "https://api.venice.ai/api/v1");
+  assert.equal(cfg.llm.embeddingApiKey, "venice-key");
+  // The chat endpoint must be untouched by it.
+  assert.equal(cfg.llm.apiKey, "sk-test");
+});
+
+test("no embedding endpoint leaves the fields unset, so .env omits them", () => {
+  const cfg = buildConfigNonInteractive(MINIMAL, stack, "/tmp/c");
+  assert.equal(cfg.llm.embeddingBaseUrl, undefined);
+  assert.equal(cfg.llm.embeddingApiKey, undefined);
+});
+
+test("an embedding base URL without its key is rejected, not silently paired with the chat key", () => {
+  // Falling back to the chat provider's key here would send one vendor's
+  // credential to another vendor's endpoint.
+  assert.throws(
+    () =>
+      buildConfigNonInteractive(
+        { ...MINIMAL, CORTEX_EMBEDDING_API_BASE: "https://api.venice.ai/api/v1" },
+        stack,
+        "/tmp/c"
+      ),
+    /must be set together/
+  );
+});
+
+test("an embedding key without its base URL is rejected too", () => {
+  assert.throws(
+    () =>
+      buildConfigNonInteractive({ ...MINIMAL, CORTEX_EMBEDDING_API_KEY: "k" }, stack, "/tmp/c"),
+    /must be set together/
+  );
+});
+
+test("a non-http embedding base URL is reported, and never echoes the key", () => {
+  let message = "";
+  try {
+    buildConfigNonInteractive(
+      { ...MINIMAL, CORTEX_EMBEDDING_API_BASE: "ftp://nope", CORTEX_EMBEDDING_API_KEY: "venice-secret" },
+      stack,
+      "/tmp/c"
+    );
+  } catch (err) {
+    message = String(err);
+  }
+  assert.match(message, /CORTEX_EMBEDDING_API_BASE="ftp:\/\/nope"/);
+  assert.ok(!message.includes("venice-secret"), "the error must not disclose the key");
+});
