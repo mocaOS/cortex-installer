@@ -7,7 +7,7 @@ import { fetchStack, assertInstallerSupported } from "../stack.js";
 import { fetchArtifacts } from "../artifacts.js";
 import { writeState, chatEnabledFor } from "../state.js";
 import { pull, up, waitHealthy, healthServices, execIn } from "../docker.js";
-import { diffComponents, rewriteImagePins, ensureChatProfile } from "../update.js";
+import { diffComponents, rewriteImagePins, ensureChatProfile, envHasChatProfile } from "../update.js";
 import { resolveInstall } from "./_shared.js";
 
 export async function run(ctx: { flags: Record<string, string | boolean> }): Promise<void> {
@@ -50,16 +50,29 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
     }
   }
 
+  const envPath = join(dir, ".env");
+  const envBefore = readFileSync(envPath, "utf8");
+
   // Refresh compose files + ops/ from the new tag, then repin .env.
   /**
    * Every install that predates the chat option was running chat, so an absent
    * state.chat means enabled. Without this, applying a stack whose compose puts
    * chat behind a profile would silently drop a running service: the data would
    * survive in chat_data, the container would not, and nothing would say why.
+   *
+   * state.chat can also go stale the OTHER way: the installer's own documented
+   * route for declining chat (see the "NOT installed" blocks in renderEnv,
+   * env.ts) tells the operator to uncomment COMPOSE_PROFILES=chat by hand and
+   * restart — and never touches cortex.json. Trusting state.chat alone would
+   * silently undo exactly that instruction on the next update: it would
+   * re-comment the operator's own line and stop watching the chat container
+   * for health. Checking .env directly closes that gap in both directions.
    */
-  const chat = chatEnabledFor(state);
+  const chat = chatEnabledFor(state) || envHasChatProfile(envBefore);
   if (state.chat === undefined) {
     p.log.info("Cortex Chat stays installed. It is optional for new installs from this release on.");
+  } else if (state.chat === false && chat) {
+    p.log.info("Cortex Chat is active in .env even though it was previously turned off — leaving it on.");
   }
   s.start("Fetching release artifacts");
   await fetchArtifacts({ version: latest.stack, dir, chat });
@@ -69,11 +82,7 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
   // write that dies mid-flight makes the graph permanently unauthenticatable.
   // See writeEnvFile. The profile edit folds into this same write rather than
   // adding a second one, so a crash never gets a chance to land between them.
-  const envPath = join(dir, ".env");
-  writeEnvFile(
-    envPath,
-    ensureChatProfile(rewriteImagePins(readFileSync(envPath, "utf8"), latest.components), chat)
-  );
+  writeEnvFile(envPath, ensureChatProfile(rewriteImagePins(envBefore, latest.components), chat));
   p.log.success("Repinned images in .env (your other settings untouched)");
 
   const pulled = new Set<string>();

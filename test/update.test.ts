@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { diffComponents, rewriteImagePins, ensureChatProfile } from "../src/update.js";
+import { diffComponents, rewriteImagePins, ensureChatProfile, envHasChatProfile } from "../src/update.js";
+import { chatEnabledFor } from "../src/state.js";
 
 const from = { backend: "1.0.0", frontend: "1.0.0", chat: "1.0.0", neo4j: "5.26-community", caddy: "2-alpine" };
 
@@ -107,4 +108,88 @@ test("enabling changes exactly one line and preserves the rest", () => {
   assert.match(out, /^NEO4J_PASSWORD=s3cret$/m);
   assert.match(out, /^OPENAI_API_KEY=k$/m);
   assert.match(out, /^COMPOSE_PROFILES=chat$/m);
+});
+
+// --- Fix round 2, Important 2: an operator's other profiles must survive. ---
+// COMPOSE_PROFILES is a comma list, not a chat-only switch: the installer's own
+// header blesses docker-compose.override.yml for an operator's own
+// profile-gated add-ons, and those commonly share this line with chat.
+
+test("ensureChatProfile appends chat to an existing profile list without disturbing it", () => {
+  const out = ensureChatProfile("COMPOSE_PROFILES=debug\nCOMPOSE_FILE=a.yml\n", true);
+  assert.match(out, /^COMPOSE_PROFILES=debug,chat$/m);
+});
+
+test("ensureChatProfile removes only chat from a multi-value list, keeping the rest active", () => {
+  const out = ensureChatProfile("COMPOSE_PROFILES=chat,myextra\nCOMPOSE_FILE=a.yml\n", false);
+  assert.match(out, /^COMPOSE_PROFILES=myextra$/m);
+  assert.ok(
+    !/^#\s*COMPOSE_PROFILES/m.test(out),
+    "a list with a remaining entry must stay active, not get commented out"
+  );
+});
+
+test("ensureChatProfile leaves an unrelated profile list untouched when chat was never in it", () => {
+  const input = "COMPOSE_PROFILES=myextra\nCOMPOSE_FILE=a.yml\n";
+  assert.equal(ensureChatProfile(input, false), input);
+});
+
+test("ensureChatProfile is idempotent on a multi-value list", () => {
+  const once = ensureChatProfile("COMPOSE_PROFILES=debug,chat\n", true);
+  assert.equal(once, "COMPOSE_PROFILES=debug,chat\n", "already-present chat must not be reformatted");
+  assert.equal(ensureChatProfile(once, true), once);
+});
+
+// --- Fix round 2, Important 1: .env and cortex.json must reconcile both ways. ---
+// state.chat can go stale in either direction: the installer's own documented
+// route for declining chat tells the operator to hand-edit .env directly and
+// never touches cortex.json (see the "NOT installed" blocks in renderEnv,
+// env.ts). commands/update.ts derives the effective value as
+// `chatEnabledFor(state) || envHasChatProfile(envText)` — these tests cover
+// envHasChatProfile itself and that exact composed expression.
+
+test("envHasChatProfile is true when chat is one of several active profiles", () => {
+  assert.equal(envHasChatProfile("COMPOSE_PROFILES=debug,chat\n"), true);
+});
+
+test("envHasChatProfile is false when the profile line is only commented out", () => {
+  assert.equal(envHasChatProfile("# COMPOSE_PROFILES=chat\n"), false);
+});
+
+test("envHasChatProfile is false when there is no profile line at all", () => {
+  assert.equal(envHasChatProfile("COMPOSE_FILE=a.yml\n"), false);
+});
+
+test("reconciliation: an active chat profile in .env overrides a stale state.chat=false", () => {
+  const state = { chat: false };
+  const envText = "COMPOSE_FILE=a.yml\nCOMPOSE_PROFILES=chat\nNEO4J_PASSWORD=s3cret\n";
+
+  // The exact expression commands/update.ts uses to derive the effective value
+  // before back-filling both .env and cortex.json.
+  const chat = chatEnabledFor(state) || envHasChatProfile(envText);
+  assert.equal(chat, true, "an active chat profile in .env must win over a stale false in cortex.json");
+
+  // Persisting `chat` (not state.chat) to cortex.json is what corrects the
+  // stale false to true; here it must also leave the already-active line alone.
+  assert.match(ensureChatProfile(envText, chat), /^COMPOSE_PROFILES=chat$/m);
+});
+
+test("reconciliation: state.chat=true restores a profile line missing from .env entirely", () => {
+  const state = { chat: true };
+  const envText = "COMPOSE_FILE=a.yml\nNEO4J_PASSWORD=s3cret\n"; // no COMPOSE_PROFILES line at all
+
+  const chat = chatEnabledFor(state) || envHasChatProfile(envText);
+  assert.equal(chat, true);
+  assert.match(ensureChatProfile(envText, chat), /^COMPOSE_PROFILES=chat$/m);
+});
+
+test("reconciliation: state.chat=true restores a profile line an operator commented out by hand", () => {
+  const state = { chat: true };
+  const envText = "COMPOSE_FILE=a.yml\n# COMPOSE_PROFILES=chat\nNEO4J_PASSWORD=s3cret\n";
+
+  const chat = chatEnabledFor(state) || envHasChatProfile(envText);
+  assert.equal(chat, true);
+  const out = ensureChatProfile(envText, chat);
+  assert.match(out, /^COMPOSE_PROFILES=chat$/m);
+  assert.equal(out.split("\n").length, envText.split("\n").length, "line count must not change");
 });

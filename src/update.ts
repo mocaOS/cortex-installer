@@ -45,14 +45,54 @@ export function rewriteImagePins(envText: string, components: Components): strin
     .join("\n");
 }
 
+/** Splits a COMPOSE_PROFILES value into its comma-separated entries, trimmed and with empty entries dropped. */
+function splitProfiles(value: string): string[] {
+  return value
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
+}
+
 /**
- * Sets or clears `COMPOSE_PROFILES=chat` in .env text, leaving every other line
- * byte-identical.
+ * Whether an active (uncommented) `COMPOSE_PROFILES` line in .env text already
+ * lists `chat` among its comma-separated values.
+ *
+ * Exported and disk-free so the reconciliation in `commands/update.ts` is
+ * unit-testable: `state.chat` can go stale relative to .env in either
+ * direction, because the installer's own documented route for declining chat
+ * (see the "NOT installed" blocks in `renderEnv`, env.ts) tells the operator
+ * to uncomment one line and restart, and never touches cortex.json. Trusting
+ * cortex.json alone would silently undo exactly what that instruction told
+ * the operator to do.
+ */
+export function envHasChatProfile(envText: string): boolean {
+  const line = envText.split("\n").find((l) => /^\s*COMPOSE_PROFILES\s*=/.test(l));
+  return line !== undefined && splitProfiles(line.slice(line.indexOf("=") + 1)).includes("chat");
+}
+
+/**
+ * Sets or clears `chat` within .env's `COMPOSE_PROFILES` list, leaving every
+ * other line — and every other profile already sharing that line — byte
+ * identical.
+ *
+ * The value is treated as a comma-separated list rather than assumed to be
+ * `chat` alone: the installer's own file header blesses
+ * docker-compose.override.yml for an operator's own profile-gated add-ons (see
+ * env.ts), and those commonly share COMPOSE_PROFILES with chat. Assigning the
+ * literal string "chat" here would silently drop whatever service the
+ * operator's own profile gates on the next `up` — the same class of silent
+ * loss this whole function exists to prevent, just aimed at the operator
+ * instead of us.
  *
  * Enabling prefers uncommenting the commented form the installer writes, so the
- * surrounding explanatory comment stays where it is and the line does not appear
- * twice. Disabling comments the line rather than deleting it, so the operator can
- * see what was turned off.
+ * surrounding explanatory comment stays where it is and the line does not
+ * appear twice. It touches an existing active line only when `chat` is
+ * actually missing from it, so re-enabling is a true byte-for-byte no-op, not
+ * just a value-equal one. Disabling removes only the `chat` entry and keeps
+ * every other one in place and in order; it comments the line out — rather
+ * than leaving a bare `COMPOSE_PROFILES=` — only once removing `chat` would
+ * empty the list, and it leaves the line untouched entirely if `chat` was
+ * never in it.
  */
 export function ensureChatProfile(envText: string, enabled: boolean): string {
   const lines = envText.split("\n");
@@ -61,17 +101,34 @@ export function ensureChatProfile(envText: string, enabled: boolean): string {
 
   if (enabled) {
     if (active !== -1) {
-      lines[active] = "COMPOSE_PROFILES=chat";
+      const profiles = splitProfiles(lines[active].slice(lines[active].indexOf("=") + 1));
+      if (!profiles.includes("chat")) {
+        lines[active] = `COMPOSE_PROFILES=${[...profiles, "chat"].join(",")}`;
+      }
     } else if (commented !== -1) {
       lines[commented] = "COMPOSE_PROFILES=chat";
     } else {
-      // Prepend rather than append: COMPOSE_* belongs with the mode block, and a
-      // trailing line after the secrets reads like an afterthought.
-      lines.unshift("COMPOSE_PROFILES=chat");
+      // Append rather than prepend: Compose is last-wins on a duplicate key, so
+      // an appended line reliably beats one this function failed to recognize
+      // (e.g. an `export COMPOSE_PROFILES=` form) — a prepended line would
+      // silently lose to it instead. Insert before a trailing blank element
+      // rather than after it, so a file that already ends in a newline still
+      // does, instead of gaining a stray blank line in the middle.
+      if (lines.length > 0 && lines[lines.length - 1] === "") {
+        lines.splice(lines.length - 1, 0, "COMPOSE_PROFILES=chat");
+      } else {
+        lines.push("COMPOSE_PROFILES=chat");
+      }
     }
     return lines.join("\n");
   }
 
-  if (active !== -1) lines[active] = "# COMPOSE_PROFILES=chat";
+  if (active !== -1) {
+    const profiles = splitProfiles(lines[active].slice(lines[active].indexOf("=") + 1));
+    if (profiles.includes("chat")) {
+      const rest = profiles.filter((p) => p !== "chat");
+      lines[active] = rest.length > 0 ? `COMPOSE_PROFILES=${rest.join(",")}` : "# COMPOSE_PROFILES=chat";
+    }
+  }
   return lines.join("\n");
 }
