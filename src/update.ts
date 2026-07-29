@@ -45,9 +45,33 @@ export function rewriteImagePins(envText: string, components: Components): strin
     .join("\n");
 }
 
+/**
+ * Normalizes a raw COMPOSE_PROFILES value the way Compose's own .env parser
+ * does, so membership checks here agree with what Compose actually sees.
+ *
+ * A value wrapped in one matching pair of quotes (single or double) is taken
+ * literally — quotes stripped, nothing else touched, and in particular a `#`
+ * inside it is part of the value, not a comment. An unquoted value has a
+ * trailing `#…` comment removed, because that IS how Compose reads it.
+ * Getting this backwards is exactly the bug this function exists to fix:
+ * splitting the raw text let `"chat,myextra"` parse as two bogus entries
+ * (`"chat` and `myextra"`) and let `chat # note` parse as the single entry
+ * `chat # note` — both hide a `chat` that Compose can see, or fabricate one
+ * it can't.
+ */
+function normalizeProfilesValue(raw: string): string {
+  const trimmed = raw.trim();
+  const quote = trimmed[0];
+  if (trimmed.length >= 2 && (quote === '"' || quote === "'") && trimmed[trimmed.length - 1] === quote) {
+    return trimmed.slice(1, -1);
+  }
+  const hash = trimmed.indexOf("#");
+  return hash === -1 ? trimmed : trimmed.slice(0, hash).trim();
+}
+
 /** Splits a COMPOSE_PROFILES value into its comma-separated entries, trimmed and with empty entries dropped. */
 function splitProfiles(value: string): string[] {
-  return value
+  return normalizeProfilesValue(value)
     .split(",")
     .map((p) => p.trim())
     .filter(Boolean);
@@ -63,7 +87,9 @@ function splitProfiles(value: string): string[] {
  * (see the "NOT installed" blocks in `renderEnv`, env.ts) tells the operator
  * to uncomment one line and restart, and never touches cortex.json. Trusting
  * cortex.json alone would silently undo exactly what that instruction told
- * the operator to do.
+ * the operator to do. Goes through the same quote/comment normalization as
+ * `ensureChatProfile`, so a hand-edited `COMPOSE_PROFILES="chat"` is
+ * recognized too, not just the unquoted form.
  */
 export function envHasChatProfile(envText: string): boolean {
   const line = envText.split("\n").find((l) => /^\s*COMPOSE_PROFILES\s*=/.test(l));
@@ -84,15 +110,23 @@ export function envHasChatProfile(envText: string): boolean {
  * loss this whole function exists to prevent, just aimed at the operator
  * instead of us.
  *
+ * The list is read through `splitProfiles`, which normalizes quoting and
+ * inline comments the way Compose's own parser does — see
+ * `normalizeProfilesValue`. Whenever an active line is actually rewritten, the
+ * output is always the plain unquoted form the installer itself writes: this
+ * function does not try to preserve an operator's quoting or inline comment,
+ * because doing so is what let a quoted or commented value disagree with what
+ * Compose reads from it in the first place. A line already in that canonical
+ * form and already correct is left completely untouched (compared by value,
+ * not just re-derived), so this is still a byte-for-byte no-op whenever there
+ * is truly nothing to do.
+ *
  * Enabling prefers uncommenting the commented form the installer writes, so the
  * surrounding explanatory comment stays where it is and the line does not
- * appear twice. It touches an existing active line only when `chat` is
- * actually missing from it, so re-enabling is a true byte-for-byte no-op, not
- * just a value-equal one. Disabling removes only the `chat` entry and keeps
- * every other one in place and in order; it comments the line out — rather
- * than leaving a bare `COMPOSE_PROFILES=` — only once removing `chat` would
- * empty the list, and it leaves the line untouched entirely if `chat` was
- * never in it.
+ * appear twice. Disabling removes only the `chat` entry and keeps every other
+ * one in place and in order; it comments the line out — rather than leaving a
+ * bare `COMPOSE_PROFILES=` — only once removing `chat` would empty the list,
+ * and it leaves the line untouched entirely if `chat` was never in it.
  */
 export function ensureChatProfile(envText: string, enabled: boolean): string {
   const lines = envText.split("\n");
@@ -102,9 +136,9 @@ export function ensureChatProfile(envText: string, enabled: boolean): string {
   if (enabled) {
     if (active !== -1) {
       const profiles = splitProfiles(lines[active].slice(lines[active].indexOf("=") + 1));
-      if (!profiles.includes("chat")) {
-        lines[active] = `COMPOSE_PROFILES=${[...profiles, "chat"].join(",")}`;
-      }
+      const target = profiles.includes("chat") ? profiles : [...profiles, "chat"];
+      const canonical = `COMPOSE_PROFILES=${target.join(",")}`;
+      if (lines[active] !== canonical) lines[active] = canonical;
     } else if (commented !== -1) {
       lines[commented] = "COMPOSE_PROFILES=chat";
     } else {
@@ -127,7 +161,8 @@ export function ensureChatProfile(envText: string, enabled: boolean): string {
     const profiles = splitProfiles(lines[active].slice(lines[active].indexOf("=") + 1));
     if (profiles.includes("chat")) {
       const rest = profiles.filter((p) => p !== "chat");
-      lines[active] = rest.length > 0 ? `COMPOSE_PROFILES=${rest.join(",")}` : "# COMPOSE_PROFILES=chat";
+      const canonical = rest.length > 0 ? `COMPOSE_PROFILES=${rest.join(",")}` : "# COMPOSE_PROFILES=chat";
+      if (lines[active] !== canonical) lines[active] = canonical;
     }
   }
   return lines.join("\n");

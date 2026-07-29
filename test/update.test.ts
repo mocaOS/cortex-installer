@@ -193,3 +193,67 @@ test("reconciliation: state.chat=true restores a profile line an operator commen
   assert.match(out, /^COMPOSE_PROFILES=chat$/m);
   assert.equal(out.split("\n").length, envText.split("\n").length, "line count must not change");
 });
+
+// --- Fix round 3: list editing must agree with Compose's own .env parser. ---
+// Compose unquotes a wrapped value and strips an unquoted trailing `#` comment
+// before it ever sees a comma. Splitting the raw text instead meant a quoted
+// or commented value disagreed with what Compose actually reads — and once
+// list-editing existed (round 2), that disagreement turned into damage:
+// writing unparseable syntax, silently failing to add chat, or silently
+// failing to remove it. All three are covered below, plus the "current
+// install already includes chat" checks needed the same normalization.
+
+test("ensureChatProfile normalizes a quoted profile list and recognizes chat already in it", () => {
+  // COMPOSE_PROFILES="chat,myextra" is a working, chat-running install. Naive
+  // comma-splitting of the raw text yields the bogus entries `"chat` and
+  // `myextra"`, so a naive "is chat already there" check fails and enabling
+  // appends a second, unparseable `,chat` outside the closing quote.
+  const out = ensureChatProfile('COMPOSE_PROFILES="chat,myextra"\n', true);
+  assert.match(out, /^COMPOSE_PROFILES=chat,myextra$/m);
+  assert.ok(!out.includes('"'), "the rewritten line must not still be quoted");
+});
+
+test("ensureChatProfile treats a single-quoted value the same as a double-quoted one", () => {
+  const out = ensureChatProfile("COMPOSE_PROFILES='chat,myextra'\n", true);
+  assert.match(out, /^COMPOSE_PROFILES=chat,myextra$/m);
+});
+
+test("ensureChatProfile strips an inline comment before deciding chat is absent, so it actually gets added", () => {
+  // Compose strips from an unquoted `#` onward, reading only `myextra` here.
+  // Splitting the raw text instead treats "myextra # note" as one opaque
+  // entry, so chat looks absent, gets appended AFTER the comment, and Compose
+  // never sees it: the update reports success while chat never starts.
+  const out = ensureChatProfile("COMPOSE_PROFILES=myextra # note\n", true);
+  assert.match(out, /^COMPOSE_PROFILES=myextra,chat$/m);
+});
+
+test("ensureChatProfile disables a quoted chat-only value by commenting the line out", () => {
+  const out = ensureChatProfile('COMPOSE_PROFILES="chat"\n', false);
+  assert.match(out, /^# COMPOSE_PROFILES=chat$/m);
+  assert.ok(!/^COMPOSE_PROFILES=/m.test(out), "must not remain active");
+});
+
+test("ensureChatProfile disables a chat-only value with a trailing comment by commenting the line out", () => {
+  // Without normalization, "chat # keep" never string-equals "chat", so the
+  // disable guard sees no chat entry to remove and leaves the line active —
+  // Compose keeps starting chat while cortex.json now says it is off.
+  const out = ensureChatProfile("COMPOSE_PROFILES=chat # keep\n", false);
+  assert.match(out, /^# COMPOSE_PROFILES=chat$/m);
+});
+
+test("envHasChatProfile recognizes a quoted chat-only value", () => {
+  assert.equal(envHasChatProfile('COMPOSE_PROFILES="chat"'), true);
+});
+
+test("a # inside a quoted value is part of the value, not a comment, so trailing entries still parse", () => {
+  // chat comes AFTER the embedded #, so if comment-stripping over-reached into
+  // a quoted value, this would wrongly come back false.
+  assert.equal(envHasChatProfile('COMPOSE_PROFILES="my#extra,chat"'), true);
+});
+
+test("reconciliation: a quoted active chat profile in .env also overrides a stale state.chat=false", () => {
+  const state = { chat: false };
+  const envText = 'COMPOSE_PROFILES="chat"\nNEO4J_PASSWORD=s3cret\n';
+  const chat = chatEnabledFor(state) || envHasChatProfile(envText);
+  assert.equal(chat, true, "a quoted active profile must be recognized too, not just the unquoted form");
+});
