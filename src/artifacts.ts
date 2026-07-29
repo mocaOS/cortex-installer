@@ -3,12 +3,21 @@ import { mkdtempSync, cpSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import semver from "semver";
+import { CHAT_OPTIONAL_SINCE } from "./stack.js";
 
 const exec = promisify(execFile);
 
 const REPO = "mocaOS/cortex-app";
 
-/** Files that must exist in the install directory after a fetch. */
+/**
+ * Files the codebase knows about across every supported release — NOT the
+ * set required from any one release. Caddyfile.chat.template in particular
+ * only exists from CHAT_OPTIONAL_SINCE onward (see requiredArtifactFiles,
+ * which is what fetchArtifacts actually validates a given release against).
+ * Kept listing both regardless of version so "both Caddyfile templates are
+ * required artifacts" below still expresses the current, full contract.
+ */
 export const ARTIFACT_FILES = [
   "docker-compose.yml",
   "docker-compose.ports.yml",
@@ -17,6 +26,56 @@ export const ARTIFACT_FILES = [
   "Caddyfile.chat.template",
   ".env.example",
 ] as const;
+
+/**
+ * True once a release ships the split Caddyfile templates (cortex-app
+ * "feat(selfhost): split the Caddyfile into app-only and with-chat
+ * templates"). Before CHAT_OPTIONAL_SINCE, a release ships only
+ * Caddyfile.template, and it already contains both site blocks — there was
+ * no split yet, so that single file IS the with-chat template on those tags,
+ * not a partial one.
+ *
+ * Mirrors supportsOptionalChat() in stack.ts (same gate, same
+ * CHAT_OPTIONAL_SINCE) but takes the bare version string fetchArtifacts
+ * already has, rather than requiring a full Stack object be built just to
+ * ask this question.
+ */
+function shipsSeparateChatTemplate(version: string): boolean {
+  return semver.valid(version) !== null && semver.gte(version, CHAT_OPTIONAL_SINCE);
+}
+
+/**
+ * The artifacts THIS release's version must contain. Releases before
+ * CHAT_OPTIONAL_SINCE never shipped Caddyfile.chat.template — requiring it
+ * there would fail every pinned old-stack install (chat true OR false) on a
+ * file that release never had to begin with, not a genuinely missing
+ * artifact.
+ */
+export function requiredArtifactFiles(version: string): readonly string[] {
+  if (shipsSeparateChatTemplate(version)) {
+    return ARTIFACT_FILES;
+  }
+  return ARTIFACT_FILES.filter((f) => f !== "Caddyfile.chat.template");
+}
+
+/**
+ * Which template to copy to ./Caddyfile, for this release version and chat
+ * choice.
+ *
+ * Releases before CHAT_OPTIONAL_SINCE have only Caddyfile.template, which (see
+ * shipsSeparateChatTemplate) already contains both site blocks. wizard.ts and
+ * buildConfigNonInteractive force chat: true for exactly those releases
+ * (their compose has no profile to switch chat off with), so "copy the
+ * app-only template" is never the right instruction for one: the file does
+ * not exist there, and copying it would also be semantically wrong even if it
+ * did, since Compose is about to start the chat container regardless.
+ */
+export function caddyTemplateFor(version: string, chat: boolean): string {
+  if (!shipsSeparateChatTemplate(version)) {
+    return "Caddyfile.template";
+  }
+  return chat ? "Caddyfile.chat.template" : "Caddyfile.template";
+}
 
 /**
  * Downloads the release tarball for `version` and lays the self-host artifacts
@@ -87,23 +146,31 @@ export async function fetchArtifacts(opts: {
     cpSync(src, opts.dir, { recursive: true });
     cpSync(join(work, "ops"), join(opts.dir, "ops"), { recursive: true });
 
+    // Validated BEFORE the Caddyfile copy below, on purpose: requiredArtifactFiles
+    // is version-gated (a pre-CHAT_OPTIONAL_SINCE release never shipped
+    // Caddyfile.chat.template), so this is the check that must decide whether a
+    // release is genuinely incomplete. Running it first means a missing file
+    // always surfaces as the message below — never as cpSync throwing ENOENT on
+    // a template the copy step below picked but this release never had.
+    for (const f of requiredArtifactFiles(opts.version)) {
+      if (!existsSync(join(opts.dir, f))) {
+        throw new Error(`release v${opts.version} is missing selfhost/${f}`);
+      }
+    }
+
     // The caddy overlay bind-mounts ./Caddyfile. If it is missing Docker
     // creates a root-owned DIRECTORY with that name and Caddy crash-loops on
     // "is a directory" with nothing pointing at the cause.
     //
     // Which template depends on the install: the app-only one omits the chat
     // site block, because a block whose {$CHAT_DOMAIN} is unset makes Caddy
-    // refuse to adapt the entire config rather than merely warn.
+    // refuse to adapt the entire config rather than merely warn. See
+    // caddyTemplateFor for why that choice collapses to a single template on
+    // releases before CHAT_OPTIONAL_SINCE.
     cpSync(
-      join(opts.dir, opts.chat ? "Caddyfile.chat.template" : "Caddyfile.template"),
+      join(opts.dir, caddyTemplateFor(opts.version, opts.chat)),
       join(opts.dir, "Caddyfile")
     );
-
-    for (const f of ARTIFACT_FILES) {
-      if (!existsSync(join(opts.dir, f))) {
-        throw new Error(`release v${opts.version} is missing selfhost/${f}`);
-      }
-    }
   } catch (err: any) {
     const msg = String(err?.stderr ?? err?.message ?? err);
     if (/404/.test(msg)) {
