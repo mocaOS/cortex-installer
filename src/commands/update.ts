@@ -51,8 +51,13 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
   }
 
   // Refresh compose files + ops/ from the new tag, then repin .env.
+  //
+  // chatEnabledFor(state) for now — this is the PRE-update state, so on an
+  // install that predates the chat option it reads absent-as-enabled, which is
+  // correct today. Task 9 replaces this with the value update back-fills into
+  // the new state, once back-filling exists.
   s.start("Fetching release artifacts");
-  await fetchArtifacts({ version: latest.stack, dir });
+  await fetchArtifacts({ version: latest.stack, dir, chat: chatEnabledFor(state) });
   s.stop("Release artifacts updated");
 
   // Atomic: this file holds the only copy of NEO4J_PASSWORD, and a truncating

@@ -255,7 +255,7 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
   mkdirSync(dir, { recursive: true });
 
   s.start("Fetching release artifacts");
-  await fetchArtifacts({ version: stack.stack, dir });
+  await fetchArtifacts({ version: stack.stack, dir, chat: cfg.chat });
   s.stop("Release artifacts in place");
 
   // Same writer as `update` — creates the file already at mode 600 rather than

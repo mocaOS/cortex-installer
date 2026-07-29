@@ -14,6 +14,7 @@ export const ARTIFACT_FILES = [
   "docker-compose.ports.yml",
   "docker-compose.caddy.yml",
   "Caddyfile.template",
+  "Caddyfile.chat.template",
   ".env.example",
 ] as const;
 
@@ -23,7 +24,11 @@ export const ARTIFACT_FILES = [
  * service builds from ./ops/backup, relative to the compose file. The release
  * attaches only stack.json, so the tarball is the supply route.
  */
-export async function fetchArtifacts(opts: { version: string; dir: string }): Promise<void> {
+export async function fetchArtifacts(opts: {
+  version: string;
+  dir: string;
+  chat: boolean;
+}): Promise<void> {
   /**
    * codeload, NOT api.github.com/repos/.../tarball/.
    *
@@ -85,7 +90,14 @@ export async function fetchArtifacts(opts: { version: string; dir: string }): Pr
     // The caddy overlay bind-mounts ./Caddyfile. If it is missing Docker
     // creates a root-owned DIRECTORY with that name and Caddy crash-loops on
     // "is a directory" with nothing pointing at the cause.
-    cpSync(join(opts.dir, "Caddyfile.template"), join(opts.dir, "Caddyfile"));
+    //
+    // Which template depends on the install: the app-only one omits the chat
+    // site block, because a block whose {$CHAT_DOMAIN} is unset makes Caddy
+    // refuse to adapt the entire config rather than merely warn.
+    cpSync(
+      join(opts.dir, opts.chat ? "Caddyfile.chat.template" : "Caddyfile.template"),
+      join(opts.dir, "Caddyfile")
+    );
 
     for (const f of ARTIFACT_FILES) {
       if (!existsSync(join(opts.dir, f))) {

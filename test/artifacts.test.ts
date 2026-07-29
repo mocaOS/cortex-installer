@@ -36,7 +36,9 @@ test("fetches every artifact the stack needs from a real release tag", async (t)
 
   const dir = mkdtempSync(join(tmpdir(), "art-"));
   // Deliberately NOT wrapped: any rejection from here on is a real failure.
-  await fetchArtifacts({ version: "1.0.0", dir });
+  // chat: false so the Caddyfile comparison below is against Caddyfile.template,
+  // the artifact this test actually names.
+  await fetchArtifacts({ version: "1.0.0", dir, chat: false });
 
   for (const f of ARTIFACT_FILES) {
     assert.ok(existsSync(join(dir, f)), `missing ${f}`);
@@ -61,5 +63,13 @@ test("rejects a version that has no release", async (t) => {
   }
 
   const dir = mkdtempSync(join(tmpdir(), "art-"));
-  await assert.rejects(fetchArtifacts({ version: "0.0.0-nope", dir }), /404|not found/i);
+  await assert.rejects(fetchArtifacts({ version: "0.0.0-nope", dir, chat: false }), /404|not found/i);
+});
+
+test("both Caddyfile templates are required artifacts", () => {
+  // A release missing one must fail loudly during the fetch, not later as Caddy
+  // crash-looping on a bind mount Docker turned into a directory.
+  const files = ARTIFACT_FILES as readonly string[];
+  assert.ok(files.includes("Caddyfile.template"));
+  assert.ok(files.includes("Caddyfile.chat.template"));
 });
