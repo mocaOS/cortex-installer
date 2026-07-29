@@ -70,7 +70,14 @@ export interface InstallConfig {
   };
 }
 
-/** Every ${VAR:?} the released compose enforces. */
+/**
+ * Every ${VAR:?} the released compose enforces.
+ *
+ * CHAT_DOMAIN is deliberately absent: the caddy overlay relaxed it to
+ * ${CHAT_DOMAIN:-} when chat became optional. CORTEX_CHAT_IMAGE and
+ * CHAT_APP_ENCRYPTION_KEY stay, because Compose interpolates them whether or
+ * not the chat profile is active.
+ */
 export const REQUIRED_VARS = [
   "CORTEX_BACKEND_IMAGE",
   "CORTEX_FRONTEND_IMAGE",
@@ -82,7 +89,6 @@ export const REQUIRED_VARS = [
   "SESSION_SECRET",
   "CHAT_APP_ENCRYPTION_KEY",
   "APP_DOMAIN",
-  "CHAT_DOMAIN",
   "ACME_EMAIL",
 ] as const;
 
@@ -122,9 +128,36 @@ export function renderEnv(cfg: InstallConfig): string {
   put("COMPOSE_FILE", COMPOSE_FILES[cfg.mode]);
   put("COMPOSE_PROJECT_NAME", cfg.projectName);
 
+  if (cfg.chat) {
+    L.push("# Cortex Chat is installed. Remove this line and run `npx @mocaos/cortex restart`");
+    L.push("# to drop it (installer >= 1.2.0: `down` names the chat profile so it really does");
+    L.push("# remove the container — plain `compose down` is profile-filtered and does not).");
+    put("COMPOSE_PROFILES", "chat");
+  } else if (cfg.mode === "domain") {
+    L.push(
+      "",
+      "# Cortex Chat is NOT installed. To add it: set COMPOSE_PROFILES=chat, add",
+      "# CHAT_DOMAIN + CHAT_BASE_URL, add the chat origin to CORS_ALLOWED_ORIGINS,",
+      "# `cp Caddyfile.chat.template Caddyfile`, then `npx @mocaos/cortex restart`.",
+      "# COMPOSE_PROFILES=chat"
+    );
+  } else {
+    L.push(
+      "",
+      "# Cortex Chat is NOT installed. To add it, uncomment the line below and run",
+      "# `npx @mocaos/cortex restart`. CHAT_PORT and CHAT_APP_ENCRYPTION_KEY below",
+      "# are already set, so in this mode that is the only change needed.",
+      "# COMPOSE_PROFILES=chat"
+    );
+  }
+
   section("Images (pinned from stack.json)");
   put("CORTEX_BACKEND_IMAGE", img.backend);
   put("CORTEX_FRONTEND_IMAGE", img.frontend);
+  if (!cfg.chat) {
+    L.push("# Read by Compose even with chat off: interpolation happens before profile");
+    L.push("# filtering, so an unset value here aborts the whole project.");
+  }
   put("CORTEX_CHAT_IMAGE", img.chat);
   put("NEO4J_VERSION", cfg.stack.components.neo4j);
   put("CADDY_VERSION", cfg.stack.components.caddy);
@@ -148,18 +181,21 @@ export function renderEnv(cfg: InstallConfig): string {
   } else {
     const d = cfg.domains!;
     section("Public domain mode");
-    L.push("# Both domains must already have A records pointing at this host.");
+    L.push(
+      cfg.chat
+        ? "# Both domains must already have A records pointing at this host."
+        : "# This domain must already have an A record pointing at this host."
+    );
     put("APP_DOMAIN", d.app);
-    // `d.chat` is `string | undefined` now that chat is optional (see
-    // InstallConfig). The renderer does not yet gate its domain-mode output on
-    // `cfg.chat` — that belongs to the task that wires the profile through this
-    // file — so this narrow fallback only keeps `put` (string | number) happy
-    // for chat-off installs; it is not a claim that the output below is correct
-    // for that case yet.
-    put("CHAT_DOMAIN", d.chat ?? "");
     put("ACME_EMAIL", d.acmeEmail);
-    put("CHAT_BASE_URL", `https://${d.chat}`);
-    put("CORS_ALLOWED_ORIGINS", `https://${d.app},https://${d.chat}`);
+    if (cfg.chat && d.chat) {
+      put("CHAT_DOMAIN", d.chat);
+      put("CHAT_BASE_URL", `https://${d.chat}`);
+    }
+    put(
+      "CORS_ALLOWED_ORIGINS",
+      cfg.chat && d.chat ? `https://${d.app},https://${d.chat}` : `https://${d.app}`
+    );
   }
 
   section("Secrets");
@@ -168,6 +204,10 @@ export function renderEnv(cfg: InstallConfig): string {
   put("ADMIN_PASSWORD", cfg.secrets.adminPassword);
   put("ADMIN_API_KEY", cfg.secrets.adminApiKey);
   put("SESSION_SECRET", cfg.secrets.sessionSecret);
+  if (!cfg.chat) {
+    L.push("# Generated even with chat off — Compose reads it regardless (see");
+    L.push("# CORTEX_CHAT_IMAGE), and it means enabling chat later needs no new secret.");
+  }
   put("CHAT_APP_ENCRYPTION_KEY", cfg.secrets.chatEncryptionKey);
 
   section("LLM");

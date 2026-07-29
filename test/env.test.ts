@@ -81,7 +81,11 @@ test("localhost mode omits the three domain-only vars entirely", () => {
 });
 
 test("domain mode also fills the three domain-only required vars", () => {
-  const cfg = base({ mode: "domain", domains: { app: "c.example.com", chat: "ch.example.com", acmeEmail: "a@example.com" } });
+  const cfg = base({
+    chat: true,
+    mode: "domain",
+    domains: { app: "c.example.com", chat: "ch.example.com", acmeEmail: "a@example.com" },
+  });
   const e = parse(renderEnv(cfg));
   assert.equal(e.APP_DOMAIN, "c.example.com");
   assert.equal(e.CHAT_DOMAIN, "ch.example.com");
@@ -113,12 +117,20 @@ test("opting into error reporting does not invent a DSN", () => {
 });
 
 test("domain mode narrows CORS to the two real origins", () => {
-  const cfg = base({ mode: "domain", domains: { app: "c.example.com", chat: "ch.example.com", acmeEmail: "a@example.com" } });
+  const cfg = base({
+    chat: true,
+    mode: "domain",
+    domains: { app: "c.example.com", chat: "ch.example.com", acmeEmail: "a@example.com" },
+  });
   assert.equal(parse(renderEnv(cfg)).CORS_ALLOWED_ORIGINS, "https://c.example.com,https://ch.example.com");
 });
 
 test("domain mode sets CHAT_BASE_URL so password reset links work", () => {
-  const cfg = base({ mode: "domain", domains: { app: "c.example.com", chat: "ch.example.com", acmeEmail: "a@example.com" } });
+  const cfg = base({
+    chat: true,
+    mode: "domain",
+    domains: { app: "c.example.com", chat: "ch.example.com", acmeEmail: "a@example.com" },
+  });
   assert.equal(parse(renderEnv(cfg)).CHAT_BASE_URL, "https://ch.example.com");
 });
 
@@ -199,4 +211,49 @@ test("writeEnvFile leaves the original intact when the write cannot be performed
   mkdirSync(`${path}.tmp`);
   assert.throws(() => writeEnvFile(path, "NEO4J_PASSWORD=replacement\n"));
   assert.equal(readFileSync(path, "utf8"), "NEO4J_PASSWORD=keepme\n");
+});
+
+test("chat off omits COMPOSE_PROFILES but keeps the two vars Compose still reads", () => {
+  const env = renderEnv(base({ chat: false }));
+  assert.ok(!/^COMPOSE_PROFILES=/m.test(env), "COMPOSE_PROFILES must be absent with chat off");
+  // Interpolation runs before profile filtering, so an unset value here aborts
+  // the entire compose project even though chat never starts.
+  assert.match(env, /^CORTEX_CHAT_IMAGE=ghcr\.io\/mocaos\/cortex-chat:/m);
+  assert.match(env, /^CHAT_APP_ENCRYPTION_KEY=.+/m);
+  // Retained so enabling chat later is a single line.
+  assert.match(env, /^CHAT_PORT=\d+/m);
+});
+
+test("chat on writes the profile line", () => {
+  assert.match(renderEnv(base({ chat: true })), /^COMPOSE_PROFILES=chat$/m);
+});
+
+test("chat off in domain mode writes no chat domain and no chat CORS origin", () => {
+  const env = renderEnv(
+    base({ chat: false, mode: "domain", domains: { app: "a.example.com", acmeEmail: "o@example.com" } })
+  );
+  assert.ok(!/^CHAT_DOMAIN=/m.test(env));
+  assert.ok(!/^CHAT_BASE_URL=/m.test(env));
+  assert.match(env, /^CORS_ALLOWED_ORIGINS=https:\/\/a\.example\.com$/m);
+});
+
+test("chat on in domain mode writes both origins", () => {
+  const env = renderEnv(
+    base({
+      chat: true,
+      mode: "domain",
+      domains: { app: "a.example.com", chat: "c.example.com", acmeEmail: "o@example.com" },
+    })
+  );
+  assert.match(env, /^CHAT_DOMAIN=c\.example\.com$/m);
+  assert.match(env, /^CHAT_BASE_URL=https:\/\/c\.example\.com$/m);
+  assert.match(env, /^CORS_ALLOWED_ORIGINS=https:\/\/a\.example\.com,https:\/\/c\.example\.com$/m);
+});
+
+test("CHAT_DOMAIN is no longer a required var", () => {
+  // The compose relaxed it to ${CHAT_DOMAIN:-}; this list must mirror the
+  // compose's ${VAR:?} guards or it lies about what a valid .env needs.
+  assert.ok(!(REQUIRED_VARS as readonly string[]).includes("CHAT_DOMAIN"));
+  assert.ok((REQUIRED_VARS as readonly string[]).includes("CORTEX_CHAT_IMAGE"));
+  assert.ok((REQUIRED_VARS as readonly string[]).includes("CHAT_APP_ENCRYPTION_KEY"));
 });
