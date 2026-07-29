@@ -257,3 +257,55 @@ test("reconciliation: a quoted active chat profile in .env also overrides a stal
   const chat = chatEnabledFor(state) || envHasChatProfile(envText);
   assert.equal(chat, true, "a quoted active profile must be recognized too, not just the unquoted form");
 });
+
+// --- Fix round 4: quoted AND commented is a composition, not a third case. ---
+// Round 3 treated "wrapped in quotes" and "has a trailing comment" as mutually
+// exclusive: the wrapped-value check required the closing quote to be the
+// LAST character, so `"chat" # note` failed it, fell into the unquoted
+// branch, and got cut at the first `#` — leaving the quote characters
+// attached (`"chat"`, not `chat`). That string never equals "chat", so this
+// was the exact same failure mode as round 3's symptom (a)/(c) all over
+// again: enabling appended a second, unparseable `,chat` outside the quotes;
+// disabling silently no-opped. The fix locates the closing quote by scanning
+// for it instead of requiring it to be the string's last character.
+
+test("ensureChatProfile normalizes a quoted value with a trailing comment (enable)", () => {
+  const out = ensureChatProfile('COMPOSE_PROFILES="chat" # note\n', true);
+  assert.match(out, /^COMPOSE_PROFILES=chat$/m);
+  assert.ok(!out.includes('"'), "must not still be quoted");
+});
+
+test("ensureChatProfile normalizes a quoted value with a trailing comment (disable)", () => {
+  const out = ensureChatProfile('COMPOSE_PROFILES="chat" # note\n', false);
+  assert.match(out, /^# COMPOSE_PROFILES=chat$/m);
+  assert.ok(!/^COMPOSE_PROFILES=/m.test(out), "must not remain active");
+});
+
+test("ensureChatProfile normalizes a quoted multi-value list with a trailing comment", () => {
+  // This is the exact input the coordinator traced through the old code to
+  // `COMPOSE_PROFILES="chat,myextra",chat` — the same unparseable shape round
+  // 3 already fixed for the no-comment case.
+  const out = ensureChatProfile('COMPOSE_PROFILES="chat,myextra" # note\n', true);
+  assert.match(out, /^COMPOSE_PROFILES=chat,myextra$/m);
+  assert.ok(!out.includes('"'), "must not still be quoted");
+});
+
+test("ensureChatProfile normalizes a single-quoted value with a trailing comment", () => {
+  const out = ensureChatProfile("COMPOSE_PROFILES='chat' # note\n", true);
+  assert.match(out, /^COMPOSE_PROFILES=chat$/m);
+});
+
+test("ensureChatProfile normalizes a quoted value whose comment has no leading space", () => {
+  const out = ensureChatProfile('COMPOSE_PROFILES="chat"# note\n', true);
+  assert.match(out, /^COMPOSE_PROFILES=chat$/m);
+});
+
+test("chat#x with no trailing comment still yields the single entry chat#x, not chat", () => {
+  // Guards the closing-quote search itself: it must stop at the FIRST
+  // matching quote character. If it instead kept treating an inner `#` as a
+  // comment start, this would come back as just "chat" instead of the
+  // distinct profile "chat#x", and chat would be wrongly considered already
+  // present instead of getting appended.
+  const out = ensureChatProfile('COMPOSE_PROFILES="chat#x"\n', true);
+  assert.match(out, /^COMPOSE_PROFILES=chat#x,chat$/m);
+});

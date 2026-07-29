@@ -49,21 +49,26 @@ export function rewriteImagePins(envText: string, components: Components): strin
  * Normalizes a raw COMPOSE_PROFILES value the way Compose's own .env parser
  * does, so membership checks here agree with what Compose actually sees.
  *
- * A value wrapped in one matching pair of quotes (single or double) is taken
- * literally — quotes stripped, nothing else touched, and in particular a `#`
- * inside it is part of the value, not a comment. An unquoted value has a
- * trailing `#…` comment removed, because that IS how Compose reads it.
- * Getting this backwards is exactly the bug this function exists to fix:
- * splitting the raw text let `"chat,myextra"` parse as two bogus entries
- * (`"chat` and `myextra"`) and let `chat # note` parse as the single entry
- * `chat # note` — both hide a `chat` that Compose can see, or fabricate one
- * it can't.
+ * A value wrapped in quotes (single or double) is taken literally up to its
+ * CLOSING quote — quotes stripped, nothing else touched, and in particular a
+ * `#` inside it is part of the value, not a comment. Anything after that
+ * closing quote is exactly what Compose itself ignores (effectively a
+ * comment), which is why the closing quote is located by scanning for it
+ * rather than by requiring it to be the last character of the trimmed value:
+ * `"chat" # note` is quoted-value-plus-comment, not an unquoted value that
+ * happens to start with a stray quote. Getting that wrong reintroduced the
+ * exact bug this function exists to fix — the value came back as `"chat"`,
+ * quote characters and all, still didn't string-equal "chat", and enabling
+ * appended a second `chat` outside the quotes again. An unquoted value (no
+ * leading quote at all) has a trailing `#…` comment removed, because that IS
+ * how Compose reads it.
  */
 function normalizeProfilesValue(raw: string): string {
   const trimmed = raw.trim();
   const quote = trimmed[0];
-  if (trimmed.length >= 2 && (quote === '"' || quote === "'") && trimmed[trimmed.length - 1] === quote) {
-    return trimmed.slice(1, -1);
+  if (quote === '"' || quote === "'") {
+    const close = trimmed.indexOf(quote, 1);
+    if (close !== -1) return trimmed.slice(1, close); // anything after this is a comment to Compose too
   }
   const hash = trimmed.indexOf("#");
   return hash === -1 ? trimmed : trimmed.slice(0, hash).trim();
