@@ -7,7 +7,6 @@ import {
   envHasChatProfile,
   envMentionsChatProfile,
 } from "../src/update.js";
-import { chatEnabledFor } from "../src/state.js";
 
 const from = { backend: "1.0.0", frontend: "1.0.0", chat: "1.0.0", neo4j: "5.26-community", caddy: "2-alpine" };
 
@@ -147,27 +146,16 @@ test("ensureChatProfile is idempotent on a multi-value list", () => {
 });
 
 // --- Fix round 2, Important 1: .env and cortex.json must reconcile both ways. ---
-// --- Fix round 1 (post-1.2.0 Critical): the reconciliation must ALSO reconcile
-// the DISABLE direction, not just enable. ---
-//
 // state.chat can go stale in either direction: the installer's own documented
 // route for adding OR declining chat tells the operator to hand-edit .env
 // directly and never touches cortex.json (see the "NOT installed" blocks in
-// renderEnv, env.ts, and the top-level README). commands/update.ts derives the
-// effective value as `envKnows ? envHasChatProfile(envText) : chatEnabledFor(state)`,
-// where `envKnows = envMentionsChatProfile(envText)` — these tests cover
-// envHasChatProfile and envMentionsChatProfile individually, and that exact
-// composed expression.
+// renderEnv, env.ts, and the top-level README).
 //
-// The 1.2.0 expression was `chatEnabledFor(state) || envHasChatProfile(envText)`.
-// A plain OR can only turn a stale `false` into `true`; it can never turn a
-// stale `true` back to `false`. An operator who turned chat off exactly as
-// documented — comment the line, run `restart` — got it silently switched
-// back on on their very next `update`. The conditional form below is what
-// makes .env authoritative in BOTH directions once it has anything to say at
-// all, while still falling back to cortex.json for a pre-1.2.0 install whose
-// .env has no COMPOSE_PROFILES line in any form — see the dedicated
-// pre-migration test below, which is the one case that must never break.
+// The composed reconciliation itself — effectiveChat — moved to src/chat.ts
+// in Fix round 2, once `start` turned out to need the exact same decision and
+// had none of it (see chat.ts's doc comment for that story). Its tests moved
+// with it, to test/chat.test.ts. These two groups here cover just the two
+// .env predicates in isolation, which still live in this file.
 
 test("envHasChatProfile is true when chat is one of several active profiles", () => {
   assert.equal(envHasChatProfile("COMPOSE_PROFILES=debug,chat\n"), true);
@@ -191,71 +179,6 @@ test("envMentionsChatProfile is true for the commented chat-only form the instal
 
 test("envMentionsChatProfile is false when there is no COMPOSE_PROFILES line in any form", () => {
   assert.equal(envMentionsChatProfile("COMPOSE_FILE=a.yml\nNEO4J_PASSWORD=s3cret\n"), false);
-});
-
-test("reconciliation: an active chat profile in .env overrides a stale state.chat=false", () => {
-  const state = { chat: false };
-  const envText = "COMPOSE_FILE=a.yml\nCOMPOSE_PROFILES=chat\nNEO4J_PASSWORD=s3cret\n";
-
-  // The exact expression commands/update.ts uses to derive the effective value
-  // before back-filling both .env and cortex.json.
-  const envKnows = envMentionsChatProfile(envText);
-  const chat = envKnows ? envHasChatProfile(envText) : chatEnabledFor(state);
-  assert.equal(chat, true, "an active chat profile in .env must win over a stale false in cortex.json");
-
-  // Persisting `chat` (not state.chat) to cortex.json is what corrects the
-  // stale false to true; here it must also leave the already-active line alone.
-  assert.match(ensureChatProfile(envText, chat), /^COMPOSE_PROFILES=chat$/m);
-});
-
-test("reconciliation: state.chat=true restores a profile line missing from .env entirely", () => {
-  const state = { chat: true };
-  const envText = "COMPOSE_FILE=a.yml\nNEO4J_PASSWORD=s3cret\n"; // no COMPOSE_PROFILES line at all
-
-  const envKnows = envMentionsChatProfile(envText);
-  const chat = envKnows ? envHasChatProfile(envText) : chatEnabledFor(state);
-  assert.equal(chat, true);
-  assert.match(ensureChatProfile(envText, chat), /^COMPOSE_PROFILES=chat$/m);
-});
-
-test("reconciliation: an operator commenting the profile out by hand overrides a stale state.chat=true", () => {
-  // This is the Fix round 1 Critical: 1.2.0's `chatEnabledFor(state) ||
-  // envHasChatProfile(envText)` gave `true` here (OR cannot produce `false`
-  // once state.chat is `true`), which made ensureChatProfile RESTORE the very
-  // line the operator had just commented out, exactly reversing the documented
-  // instruction and silently turning chat back on.
-  const state = { chat: true };
-  const envText = "COMPOSE_FILE=a.yml\n# COMPOSE_PROFILES=chat\nNEO4J_PASSWORD=s3cret\n";
-
-  const envKnows = envMentionsChatProfile(envText);
-  assert.equal(envKnows, true, "a commented mention still counts as .env having an opinion");
-  const chat = envKnows ? envHasChatProfile(envText) : chatEnabledFor(state);
-  assert.equal(chat, false, "a commented profile line in .env must win over a stale true in cortex.json");
-
-  // Persisting `chat` (not state.chat) to cortex.json is what corrects the
-  // stale true to false; here it must also leave the already-commented line
-  // alone rather than "restoring" it.
-  const out = ensureChatProfile(envText, chat);
-  assert.equal(out, envText, "already-off must be a byte-for-byte no-op, not a restore");
-  assert.match(out, /^# COMPOSE_PROFILES=chat$/m);
-});
-
-test("reconciliation: a pre-migration install falls back to state and chat stays on (the Task 9 migration)", () => {
-  // A .env written by an installer <=1.1.0 has no COMPOSE_PROFILES line
-  // whatsoever — active or commented — because the variable did not exist
-  // yet. This is the one case that must never break: envMentionsChatProfile
-  // must read false here so the decision falls back to chatEnabledFor(state),
-  // and an absent state.chat there must still mean chat stays on.
-  const state = {}; // no `chat` field at all: this install predates the option
-  const envText = "COMPOSE_FILE=docker-compose.yml:docker-compose.ports.yml\nNEO4J_PASSWORD=s3cret\n";
-
-  assert.equal(envMentionsChatProfile(envText), false, "a pre-1.2.0 .env has no COMPOSE_PROFILES line in any form");
-
-  const envKnows = envMentionsChatProfile(envText);
-  const chat = envKnows ? envHasChatProfile(envText) : chatEnabledFor(state);
-  assert.equal(chat, true, "absent state.chat plus no .env line at all must still mean chat stays on");
-
-  assert.match(ensureChatProfile(envText, chat), /^COMPOSE_PROFILES=chat$/m);
 });
 
 // --- Fix round 3: list editing must agree with Compose's own .env parser. ---
@@ -315,13 +238,9 @@ test("a # inside a quoted value is part of the value, not a comment, so trailing
   assert.equal(envHasChatProfile('COMPOSE_PROFILES="my#extra,chat"'), true);
 });
 
-test("reconciliation: a quoted active chat profile in .env also overrides a stale state.chat=false", () => {
-  const state = { chat: false };
-  const envText = 'COMPOSE_PROFILES="chat"\nNEO4J_PASSWORD=s3cret\n';
-  const envKnows = envMentionsChatProfile(envText);
-  const chat = envKnows ? envHasChatProfile(envText) : chatEnabledFor(state);
-  assert.equal(chat, true, "a quoted active profile must be recognized too, not just the unquoted form");
-});
+// The quoted-value reconciliation case ("a quoted active chat profile in .env
+// also overrides a stale state.chat=false") moved to test/chat.test.ts along
+// with the rest of the effectiveChat tests — see the comment above.
 
 // --- Fix round 4: quoted AND commented is a composition, not a third case. ---
 // Round 3 treated "wrapped in quotes" and "has a trailing comment" as mutually

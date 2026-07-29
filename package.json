@@ -1,6 +1,6 @@
 {
   "name": "@mocaos/cortex",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Interactive installer for self-hosted Cortex",
   "license": "Apache-2.0",
   "author": "mocaOS",

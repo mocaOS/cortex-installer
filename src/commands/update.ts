@@ -5,15 +5,10 @@ import { banner, noteBox, prompts as p } from "../ui.js";
 import { installerVersion } from "../version.js";
 import { fetchStack, assertInstallerSupported } from "../stack.js";
 import { fetchArtifacts } from "../artifacts.js";
-import { writeState, chatEnabledFor } from "../state.js";
+import { writeState } from "../state.js";
 import { pull, up, waitHealthy, healthServices, execIn } from "../docker.js";
-import {
-  diffComponents,
-  rewriteImagePins,
-  ensureChatProfile,
-  envHasChatProfile,
-  envMentionsChatProfile,
-} from "../update.js";
+import { diffComponents, rewriteImagePins, ensureChatProfile } from "../update.js";
+import { effectiveChat } from "../chat.js";
 import { resolveInstall } from "./_shared.js";
 
 export async function run(ctx: { flags: Record<string, string | boolean> }): Promise<void> {
@@ -60,31 +55,12 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
   const envBefore = readFileSync(envPath, "utf8");
 
   // Refresh compose files + ops/ from the new tag, then repin .env.
-  /**
-   * .env is the documented switch — the README tells the operator to comment
-   * or uncomment COMPOSE_PROFILES=chat by hand and run `restart` (stop+start,
-   * which never touches cortex.json) — so once .env has anything to say about
-   * the profile at all, it must be believed over cortex.json, in BOTH
-   * directions.
-   *
-   * 1.2.0 shipped `chatEnabledFor(state) || envHasChatProfile(envBefore)`.
-   * That OR gets the enable direction right but can never flip a stale `true`
-   * back to `false`: an operator who turned chat off exactly as documented —
-   * comment the line, restart — got it silently switched back on on their
-   * very next update, because chatEnabledFor(state) still said true and OR
-   * short-circuited straight past the disabled .env. There was no log line
-   * for that direction either, so it happened without a trace.
-   *
-   * envMentionsChatProfile is what keeps the state fallback conditional
-   * instead of automatic: a pre-1.2.0 install's .env has no COMPOSE_PROFILES
-   * line at all, active or commented, because the variable did not exist
-   * yet. Only then do we fall back to chatEnabledFor(state) — which is what
-   * preserves the Task 9 migration (an absent state.chat there still means
-   * chat stays on). Once .env actually mentions the profile, in either form,
-   * envHasChatProfile decides on its own, full stop.
-   */
-  const envKnows = envMentionsChatProfile(envBefore);
-  const chat = envKnows ? envHasChatProfile(envBefore) : chatEnabledFor(state);
+  // effectiveChat (src/chat.ts) is the single reconciliation of cortex.json
+  // against .env — see its doc comment for the full rule and the Fix round 1
+  // history of getting it wrong. `update` already has .env open in memory
+  // here (envBefore), so it passes that straight through rather than having
+  // effectiveChat re-read the file.
+  const chat = effectiveChat(envBefore, state);
   if (state.chat === undefined) {
     p.log.info("Cortex Chat stays installed. It is optional for new installs from this release on.");
   } else if (state.chat === false && chat) {
