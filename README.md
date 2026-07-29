@@ -7,6 +7,36 @@ agentic knowledge base with a chat front end.
 npx @mocaos/cortex
 ```
 
+Note there is no `install` subcommand — `npx` already means "fetch and run", so
+`npx install @mocaos/cortex` tries to run a package literally named `install`
+and fails with `could not determine executable to run`.
+
+### If you get `ENOVERSIONS`
+
+```
+npm error code ENOVERSIONS
+npm error No versions available for @mocaos/cortex
+```
+
+The package is fine and public. This is npm's supply-chain cooldown: if your
+`.npmrc` sets `min-release-age` (increasingly common after the npm compromises
+of recent months), npm hides every version published inside that window. A
+release that is hours old therefore has *no* eligible versions, and the error
+says so in a way that sounds like the package doesn't exist.
+
+Check with `npm config get min-release-age`. To install anyway without weakening
+the policy anywhere else, override it for the one command:
+
+```bash
+npx --min-release-age=0 @mocaos/cortex
+```
+
+The flag works on every verb (`npx --min-release-age=0 @mocaos/cortex status`),
+and once the release is older than your window plain `npx @mocaos/cortex`
+resolves normally. npm has no way to exempt a single package, so it is the flag
+or the wait — keep the setting; a cooldown is a genuinely good defence, and it is
+worth more than installing a release on its first day.
+
 ## What you need
 
 Docker with the **Compose v2 plugin** (`docker compose version`). On Linux,
