@@ -117,8 +117,21 @@ export function pull(
   });
 }
 
+/**
+ * --build is required, not an optimisation. Every app service uses a prebuilt
+ * GHCR image, but the backup sidecar is built locally from the release's
+ * ops/backup directory (see selfhost/docker-compose.yml). Compose builds a
+ * missing image but never rebuilds an existing one just because its context
+ * changed, so without --build an `update` that downloads corrected backup or
+ * restore scripts would keep running the sidecar image built at install time —
+ * the fix would land on disk and never reach the container. Rebuild cost is a
+ * COPY of two shell scripts onto a cached base, so this is nearly free when
+ * nothing changed.
+ */
+export const UP_ARGS = ["up", "-d", "--remove-orphans", "--build"];
+
 export async function up(dir: string): Promise<void> {
-  await run(dir, ["up", "-d", "--remove-orphans"]);
+  await run(dir, [...UP_ARGS]);
 }
 
 export async function down(dir: string, volumes = false): Promise<void> {

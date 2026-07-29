@@ -1,6 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { composeArgs, parsePullProgress, parseHealth, healthServices, ServiceStatus } from "../src/docker.js";
+import { composeArgs, parsePullProgress, parseHealth, healthServices, ServiceStatus, UP_ARGS } from "../src/docker.js";
+
+test("up passes --build, without which an update never reaches the locally built backup sidecar", () => {
+  // The sidecar is built from the release's ops/backup directory. Compose builds
+  // a missing image but never rebuilds an existing one because its context
+  // changed, so a corrected backup/restore script would land on disk and keep
+  // running the image built at install time. Verified against real Compose: after
+  // replacing ops/backup/restore.sh, `up -d --remove-orphans` left the image
+  // stale; adding --build rebuilt it.
+  assert.ok(UP_ARGS.includes("--build"), `--build missing from up args: ${UP_ARGS.join(" ")}`);
+  assert.deepEqual(UP_ARGS, ["up", "-d", "--remove-orphans", "--build"]);
+});
 
 test("composeArgs pins the project directory (cwd independence additionally requires cwd: dir on the child process — see run/pull/logs)", () => {
   const a = composeArgs("/opt/cortex");
