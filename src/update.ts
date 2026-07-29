@@ -102,6 +102,39 @@ export function envHasChatProfile(envText: string): boolean {
 }
 
 /**
+ * Whether .env has anything AT ALL to say about the chat profile: an active
+ * `COMPOSE_PROFILES` line (whatever it lists), or the exact commented form
+ * this codebase writes when chat is declined (`# COMPOSE_PROFILES=chat`) —
+ * either the installer's own initial `renderEnv` output or the commented form
+ * `ensureChatProfile` itself produces when disabling drops the list to empty.
+ *
+ * This is the gate that makes .env's word final in BOTH directions rather
+ * than only the enable one. 1.2.0 shipped
+ * `chatEnabledFor(state) || envHasChatProfile(envText)`: a plain OR can turn a
+ * stale `false` into `true`, but can never turn a stale `true` back to
+ * `false`. An operator who did exactly what the README documents — comment
+ * the line, run `restart` (stop+start, which never touches cortex.json) —
+ * got chat silently re-enabled on their very next `update`, because
+ * `chatEnabledFor(state)` still read `true` and OR short-circuited past the
+ * now-disabled .env. envKnows replaces that OR: once .env mentions the
+ * profile in any form, `envHasChatProfile` alone decides, full stop, in
+ * either direction.
+ *
+ * The one case that must still fall back to cortex.json is the one Task 9
+ * exists for: a pre-1.2.0 .env has no `COMPOSE_PROFILES` line whatsoever,
+ * active or commented, because the variable did not exist yet. There
+ * `envMentionsChatProfile` is false, so the caller falls back to
+ * `chatEnabledFor(state)` — an absent `state.chat` there still means chat
+ * stays on. See the call site in `commands/update.ts` for the full
+ * `envKnows ? envHasChatProfile(envText) : chatEnabledFor(state)` expression.
+ */
+export function envMentionsChatProfile(envText: string): boolean {
+  return envText
+    .split("\n")
+    .some((l) => /^\s*COMPOSE_PROFILES\s*=/.test(l) || /^\s*#\s*COMPOSE_PROFILES\s*=\s*chat\s*$/.test(l));
+}
+
+/**
  * Sets or clears `chat` within .env's `COMPOSE_PROFILES` list, leaving every
  * other line — and every other profile already sharing that line — byte
  * identical.

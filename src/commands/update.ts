@@ -7,7 +7,13 @@ import { fetchStack, assertInstallerSupported } from "../stack.js";
 import { fetchArtifacts } from "../artifacts.js";
 import { writeState, chatEnabledFor } from "../state.js";
 import { pull, up, waitHealthy, healthServices, execIn } from "../docker.js";
-import { diffComponents, rewriteImagePins, ensureChatProfile, envHasChatProfile } from "../update.js";
+import {
+  diffComponents,
+  rewriteImagePins,
+  ensureChatProfile,
+  envHasChatProfile,
+  envMentionsChatProfile,
+} from "../update.js";
 import { resolveInstall } from "./_shared.js";
 
 export async function run(ctx: { flags: Record<string, string | boolean> }): Promise<void> {
@@ -55,24 +61,36 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
 
   // Refresh compose files + ops/ from the new tag, then repin .env.
   /**
-   * Every install that predates the chat option was running chat, so an absent
-   * state.chat means enabled. Without this, applying a stack whose compose puts
-   * chat behind a profile would silently drop a running service: the data would
-   * survive in chat_data, the container would not, and nothing would say why.
+   * .env is the documented switch — the README tells the operator to comment
+   * or uncomment COMPOSE_PROFILES=chat by hand and run `restart` (stop+start,
+   * which never touches cortex.json) — so once .env has anything to say about
+   * the profile at all, it must be believed over cortex.json, in BOTH
+   * directions.
    *
-   * state.chat can also go stale the OTHER way: the installer's own documented
-   * route for declining chat (see the "NOT installed" blocks in renderEnv,
-   * env.ts) tells the operator to uncomment COMPOSE_PROFILES=chat by hand and
-   * restart — and never touches cortex.json. Trusting state.chat alone would
-   * silently undo exactly that instruction on the next update: it would
-   * re-comment the operator's own line and stop watching the chat container
-   * for health. Checking .env directly closes that gap in both directions.
+   * 1.2.0 shipped `chatEnabledFor(state) || envHasChatProfile(envBefore)`.
+   * That OR gets the enable direction right but can never flip a stale `true`
+   * back to `false`: an operator who turned chat off exactly as documented —
+   * comment the line, restart — got it silently switched back on on their
+   * very next update, because chatEnabledFor(state) still said true and OR
+   * short-circuited straight past the disabled .env. There was no log line
+   * for that direction either, so it happened without a trace.
+   *
+   * envMentionsChatProfile is what keeps the state fallback conditional
+   * instead of automatic: a pre-1.2.0 install's .env has no COMPOSE_PROFILES
+   * line at all, active or commented, because the variable did not exist
+   * yet. Only then do we fall back to chatEnabledFor(state) — which is what
+   * preserves the Task 9 migration (an absent state.chat there still means
+   * chat stays on). Once .env actually mentions the profile, in either form,
+   * envHasChatProfile decides on its own, full stop.
    */
-  const chat = chatEnabledFor(state) || envHasChatProfile(envBefore);
+  const envKnows = envMentionsChatProfile(envBefore);
+  const chat = envKnows ? envHasChatProfile(envBefore) : chatEnabledFor(state);
   if (state.chat === undefined) {
     p.log.info("Cortex Chat stays installed. It is optional for new installs from this release on.");
   } else if (state.chat === false && chat) {
     p.log.info("Cortex Chat is active in .env even though it was previously turned off — leaving it on.");
+  } else if (state.chat === true && !chat) {
+    p.log.info("Cortex Chat is commented out in .env even though it was previously on — turning it off.");
   }
   s.start("Fetching release artifacts");
   await fetchArtifacts({ version: latest.stack, dir, chat });
