@@ -103,6 +103,34 @@ supply `CORTEX_ADMIN_PASSWORD`, `CORTEX_NEO4J_PASSWORD`,
 `CORTEX_ADMIN_API_KEY`, `CORTEX_SESSION_SECRET` or
 `CORTEX_CHAT_ENCRYPTION_KEY`.
 
+Cortex Chat is **not** installed by default. Add it with:
+
+```bash
+CORTEX_ENABLE_CHAT=true
+```
+
+In domain mode that also makes `CORTEX_CHAT_DOMAIN` required. The interactive
+wizard asks the same question, defaulting to No.
+
+To add or remove chat after installing, edit `.env` — set or comment out
+`COMPOSE_PROFILES=chat` — and run `npx @mocaos/cortex restart`. Use the
+installer's `restart`, not a raw `docker compose down` (with or without
+`--remove-orphans`): Compose filters teardown to the profiles currently
+active, so once `.env` no longer selects chat, plain `down` can't see that
+container and silently leaves it running — `--remove-orphans` only removes
+services dropped from the compose file entirely, not one that's merely
+profile-gated off. `restart` names the chat profile explicitly so it really
+is removed; the manual equivalent is
+`docker compose stop chat && docker compose rm -f chat`. In localhost mode
+the `.env` edit is the only change needed; the chat port and encryption key
+are already written. In domain mode you also need `CHAT_DOMAIN`,
+`CHAT_BASE_URL`, the chat origin in `CORS_ALLOWED_ORIGINS`, and
+`cp Caddyfile.chat.template Caddyfile`.
+
+Hand-editing `COMPOSE_PROFILES=chat` yourself works too: the next
+`cortex update` detects it and corrects `cortex.json` to match, rather than
+reverting your edit back to whatever it last knew.
+
 Embeddings default to the chat provider. When they come from somewhere else —
 Groq serves chat but no embeddings, and Venice is a common embedding pairing —
 set both of:
