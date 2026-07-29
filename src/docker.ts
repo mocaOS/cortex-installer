@@ -78,16 +78,27 @@ export function parseHealth(psJson: string): ServiceStatus[] {
   }));
 }
 
-async function run(dir: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+async function run(
+  dir: string,
+  args: string[],
+  env?: Record<string, string>
+): Promise<{ stdout: string; stderr: string }> {
   // docker compose ps writes to stderr even on success (e.g. "variable is not set" warnings).
   // Return them separately so parseHealth can ignore stderr chatter.
   //
   // cwd: dir is load-bearing, not cosmetic — see composeArgs' comment.
   // --project-directory alone does not resolve COMPOSE_FILE's relative
   // filenames against `dir`; only running the child process from `dir` does.
+  //
+  // env, when given, is merged OVER a copy of process.env and passed only to
+  // this child process — process.env itself is never written to. Mutating it
+  // would leak an overlay like DOWN_ENV into every later Compose call made by
+  // this same process (e.g. `restart`, which runs `down` then `up` back to
+  // back) and silently re-enable a profile the operator's .env does not select.
   return exec("docker", [...composeArgs(dir), ...args], {
     maxBuffer: 32 * 1024 * 1024,
     cwd: dir,
+    ...(env ? { env: { ...process.env, ...env } } : {}),
   });
 }
 
@@ -134,8 +145,26 @@ export async function up(dir: string): Promise<void> {
   await run(dir, [...UP_ARGS]);
 }
 
+/** Env overlay for `down` — see the comment on `down` for why chat is named. */
+export const DOWN_ENV = { COMPOSE_PROFILES: "chat" } as const;
+
+/**
+ * `COMPOSE_PROFILES=chat` is set unconditionally here, and it is not a bug.
+ *
+ * Compose filters by profile on the way DOWN as well as up, so a `down` issued
+ * while the chat profile is inactive leaves a running chat container untouched —
+ * verified live, and `--remove-orphans` does not help, because a profile-gated
+ * service is still *defined*, merely inactive. That would make `stop` and
+ * `restart` silently incomplete, and `uninstall` leave a container behind after
+ * the user asked for the whole install to be removed.
+ *
+ * Naming the profile here means `down` always addresses every container the
+ * project owns, whatever `.env` currently selects. It is also what makes
+ * turning chat off a `.env` edit plus `restart`, rather than a manual
+ * `docker compose rm`.
+ */
 export async function down(dir: string, volumes = false): Promise<void> {
-  await run(dir, volumes ? ["down", "-v"] : ["down"]);
+  await run(dir, volumes ? ["down", "-v"] : ["down"], DOWN_ENV);
 }
 
 export async function ps(dir: string): Promise<ServiceStatus[]> {
@@ -174,9 +203,19 @@ export function logs(dir: string, service?: string): Promise<number> {
  * overlay is not composed in — the container does not exist, `ps` never lists
  * it, and waitHealthy would spin for the full five-minute timeout waiting for a
  * service that is never coming.
+ *
+ * chat works the same way: it is profile-gated, off by default (see Task 5/6),
+ * so `chat` here must reflect whether it was actually installed, not merely be
+ * assumed. Naming it when Compose was never asked to create it means
+ * waitHealthy polls for the full 300s and then reports a false failure on an
+ * otherwise healthy stack.
  */
-export function healthServices(mode: "localhost" | "domain"): string[] {
-  const services = ["neo4j", "backend", "frontend", "chat"];
+export function healthServices(mode: "localhost" | "domain", chat: boolean): string[] {
+  const services = ["neo4j", "backend", "frontend"];
+  // Only name services Compose was actually asked to create: waitHealthy polls
+  // until each one appears, so an uninstalled chat means a full-timeout spin
+  // ending in a false failure.
+  if (chat) services.push("chat");
   if (mode === "domain") services.push("caddy");
   return services;
 }

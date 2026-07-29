@@ -5,7 +5,7 @@ import { banner, noteBox, prompts as p } from "../ui.js";
 import { installerVersion } from "../version.js";
 import { fetchStack, assertInstallerSupported } from "../stack.js";
 import { fetchArtifacts } from "../artifacts.js";
-import { writeState } from "../state.js";
+import { writeState, chatEnabledFor } from "../state.js";
 import { pull, up, waitHealthy, healthServices, execIn } from "../docker.js";
 import { diffComponents, rewriteImagePins } from "../update.js";
 import { resolveInstall } from "./_shared.js";
@@ -75,7 +75,12 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
   // state.mode decides whether caddy is part of the stack — see healthServices.
   // An update that leaves caddy crash-looping on the new version is exactly the
   // case this must not report as healthy.
-  const ok = await waitHealthy(dir, healthServices(state.mode));
+  //
+  // chatEnabledFor(state) for now — this is the PRE-update state, so on an
+  // install that predates the chat option it reads absent-as-enabled, which is
+  // correct today. Task 9 replaces this with the value update back-fills into
+  // the new state, once back-filling exists.
+  const ok = await waitHealthy(dir, healthServices(state.mode, chatEnabledFor(state)));
   s.stop(ok ? "All services healthy" : "Timed out waiting for health");
 
   writeState(dir, {

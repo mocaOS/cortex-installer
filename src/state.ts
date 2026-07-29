@@ -22,6 +22,18 @@ export interface InstallState {
   previous?: { stack: string; components: Stack["components"] };
 }
 
+/**
+ * Whether chat is part of an existing install.
+ *
+ * An absent `chat` field means the install predates the option, and every such
+ * install was running chat — so absent reads as enabled. Only an explicit
+ * `false` means someone declined it. Treating absent as disabled would silently
+ * drop a running service on the next update.
+ */
+export function chatEnabledFor(state: { chat?: boolean }): boolean {
+  return state.chat !== false;
+}
+
 export const STATE_FILE = "cortex.json";
 
 export function readState(dir: string): InstallState | null {

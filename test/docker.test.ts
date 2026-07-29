@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { composeArgs, parsePullProgress, parseHealth, healthServices, ServiceStatus, UP_ARGS } from "../src/docker.js";
+import { composeArgs, parsePullProgress, parseHealth, healthServices, ServiceStatus, UP_ARGS, DOWN_ENV } from "../src/docker.js";
 
 test("up passes --build, without which an update never reaches the locally built backup sidecar", () => {
   // The sidecar is built from the release's ops/backup directory. Compose builds
@@ -116,27 +116,47 @@ test("parseHealth spreads arrays found in per-line parsing, not phantom rows", (
 // localhost mode, where the caddy overlay is not composed in at all and waiting
 // on it would burn the full timeout on a container that never exists.
 test("healthServices watches caddy in domain mode", () => {
-  const svc = healthServices("domain");
+  const svc = healthServices("domain", true);
   assert.ok(svc.includes("caddy"), `expected caddy in ${JSON.stringify(svc)}`);
   assert.deepEqual(svc, ["neo4j", "backend", "frontend", "chat", "caddy"]);
 });
 
 test("healthServices does not watch caddy in localhost mode", () => {
-  const svc = healthServices("localhost");
+  const svc = healthServices("localhost", true);
   assert.ok(!svc.includes("caddy"), `caddy must not be watched: ${JSON.stringify(svc)}`);
   assert.deepEqual(svc, ["neo4j", "backend", "frontend", "chat"]);
 });
 
-test("healthServices always watches the four application services", () => {
+test("healthServices always watches the three core application services", () => {
   for (const mode of ["localhost", "domain"] as const) {
-    for (const name of ["neo4j", "backend", "frontend", "chat"]) {
-      assert.ok(healthServices(mode).includes(name), `${mode} must watch ${name}`);
+    for (const chat of [false, true]) {
+      for (const name of ["neo4j", "backend", "frontend"]) {
+        assert.ok(healthServices(mode, chat).includes(name), `${mode}/chat=${chat} must watch ${name}`);
+      }
     }
   }
 });
 
 test("healthServices returns a fresh array each call (callers must not mutate shared state)", () => {
-  const a = healthServices("domain");
+  const a = healthServices("domain", true);
   a.push("mutated");
-  assert.ok(!healthServices("domain").includes("mutated"));
+  assert.ok(!healthServices("domain", true).includes("mutated"));
+});
+
+test("healthServices omits chat when chat is not installed", () => {
+  // waitHealthy polls until every named service appears. Naming a service that
+  // Compose was never asked to create means a 300s spin ending in a false
+  // failure on a perfectly healthy stack.
+  assert.deepEqual(healthServices("localhost", false), ["neo4j", "backend", "frontend"]);
+  assert.deepEqual(healthServices("localhost", true), ["neo4j", "backend", "frontend", "chat"]);
+  assert.deepEqual(healthServices("domain", false), ["neo4j", "backend", "frontend", "caddy"]);
+  assert.deepEqual(healthServices("domain", true), ["neo4j", "backend", "frontend", "chat", "caddy"]);
+});
+
+test("down runs with the chat profile so it removes every container the project owns", () => {
+  // Compose filters by profile on the way down too: with chat inactive, a
+  // running chat container survives `down` AND `down --remove-orphans`. Without
+  // this, `uninstall` leaves a container behind after the user asked for the
+  // install to be removed, and turning chat off via `restart` silently fails.
+  assert.equal(DOWN_ENV.COMPOSE_PROFILES, "chat");
 });

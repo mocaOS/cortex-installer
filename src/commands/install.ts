@@ -224,8 +224,13 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
      * which means "cannot check", not "occupied", and must never abort — see
      * probePort in preflight.ts.
      */
-    const portsToCheck =
-      cfg.mode === "domain" ? [80, 443] : Object.values(cfg.ports);
+    // Omit the chat port when chat is not installed: nothing will bind it, and
+    // under --yes an occupied port is fatal, so checking it could abort an
+    // install over a conflict that cannot occur.
+    const localhostPorts = cfg.chat
+      ? Object.values(cfg.ports)
+      : [cfg.ports.app, cfg.ports.api, cfg.ports.neo4jHttp, cfg.ports.neo4jBolt];
+    const portsToCheck = cfg.mode === "domain" ? [80, 443] : localhostPorts;
     s.start("Checking ports");
     const portPre = await runPreflight({ ports: portsToCheck, portsFatal: true });
     s.stop("Ports checked");
@@ -264,6 +269,7 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
     stack: stack.stack,
     components: stack.components,
     mode: cfg.mode,
+    chat: cfg.chat,
     projectName: cfg.projectName,
     dir,
     installedAt: new Date().toISOString(),
@@ -290,7 +296,7 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
   // In domain mode this includes caddy, which is the only service publishing
   // ports there — see healthServices. Without it the URLs printed below could
   // be announced as working while nothing was listening on 80/443 at all.
-  const healthy = await waitHealthy(dir, healthServices(cfg.mode), 300_000, (st) => {
+  const healthy = await waitHealthy(dir, healthServices(cfg.mode, cfg.chat), 300_000, (st) => {
     s.message(`Waiting — ${st.map((x) => `${x.service}:${x.health ?? x.state}`).join(" ")}`);
   });
   s.stop(healthy ? "All services healthy" : "Timed out waiting for health");
@@ -301,8 +307,14 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
 
   const urls =
     cfg.mode === "localhost"
-      ? [`Cortex   http://localhost:${cfg.ports.app}`, `Chat     http://localhost:${cfg.ports.chat}`]
-      : [`Cortex   https://${cfg.domains!.app}`, `Chat     https://${cfg.domains!.chat}`];
+      ? [
+          `Cortex   http://localhost:${cfg.ports.app}`,
+          ...(cfg.chat ? [`Chat     http://localhost:${cfg.ports.chat}`] : []),
+        ]
+      : [
+          `Cortex   https://${cfg.domains!.app}`,
+          ...(cfg.chat && cfg.domains!.chat ? [`Chat     https://${cfg.domains!.chat}`] : []),
+        ];
 
   noteBox("Cortex is running", [
     ...urls,

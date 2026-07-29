@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readState, writeState, findInstallDir, type InstallState } from "../src/state.js";
+import { readState, writeState, findInstallDir, chatEnabledFor, type InstallState } from "../src/state.js";
 
 const components = { backend: "1.0.0", frontend: "1.0.0", chat: "1.0.0", neo4j: "5.26-community", caddy: "2-alpine" };
 
@@ -57,4 +57,15 @@ test("findInstallDir walks upwards", () => {
 
 test("findInstallDir returns null when there is no install above", () => {
   assert.equal(findInstallDir(mkdtempSync(join(tmpdir(), "st-"))), null);
+});
+
+test("an install predating the chat option counts as chat-enabled", () => {
+  // This distinction is the whole migration. `undefined` means the install was
+  // made before the choice existed, and every such install runs chat; `false`
+  // means someone deliberately declined it. Collapsing them would either drop a
+  // running service or resurrect a declined one.
+  assert.equal(chatEnabledFor({}), true);
+  assert.equal(chatEnabledFor({ chat: undefined }), true);
+  assert.equal(chatEnabledFor({ chat: true }), true);
+  assert.equal(chatEnabledFor({ chat: false }), false);
 });
