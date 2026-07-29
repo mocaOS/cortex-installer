@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseStack, assertInstallerSupported, imageRefs, fetchStack } from "../src/stack.js";
+import {
+  parseStack,
+  assertInstallerSupported,
+  imageRefs,
+  fetchStack,
+  supportsOptionalChat,
+  CHAT_OPTIONAL_SINCE,
+} from "../src/stack.js";
 
 const GOOD = {
   stack: "1.0.0",
@@ -129,4 +136,15 @@ test("rejects a non-semver minInstaller version with a descriptive error", () =>
       return /minInstaller/.test(err.message) && /latest/.test(err.message);
     }
   );
+});
+
+test("optional chat is gated on the stack release that introduced the profile", () => {
+  // A new installer can still install an OLD stack (minInstaller only guards the
+  // other direction). On a stack whose compose has no chat profile, omitting
+  // COMPOSE_PROFILES would NOT disable chat — it would run anyway while the
+  // installer reported it as off. So the question must not be asked there.
+  const at = (v: string) => parseStack({ ...GOOD, stack: v });
+  assert.equal(supportsOptionalChat(at("1.0.1")), false);
+  assert.equal(supportsOptionalChat(at(CHAT_OPTIONAL_SINCE)), true);
+  assert.equal(supportsOptionalChat(at("2.0.0")), true);
 });

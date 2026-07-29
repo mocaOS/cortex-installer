@@ -16,6 +16,21 @@ export interface Stack {
 const REPO = "mocaOS/cortex-app";
 const COMPONENTS = ["backend", "frontend", "chat", "neo4j", "caddy"] as const;
 
+/**
+ * First stack release whose compose puts the chat service behind a profile.
+ *
+ * `minInstaller` stops an OLD installer applying a NEW stack, but not the
+ * reverse: this installer can still install an older pinned stack, whose
+ * compose runs chat unconditionally. Omitting COMPOSE_PROFILES there would not
+ * disable chat — chat would run while we reported it as off — so on such a
+ * stack the choice is not offered at all.
+ */
+export const CHAT_OPTIONAL_SINCE = "1.1.0";
+
+export function supportsOptionalChat(stack: Stack): boolean {
+  return semver.valid(stack.stack) !== null && semver.gte(stack.stack, CHAT_OPTIONAL_SINCE);
+}
+
 function isNonEmptyString(val: unknown): boolean {
   return typeof val === "string" && val.trim().length > 0;
 }

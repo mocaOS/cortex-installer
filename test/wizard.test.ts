@@ -3,8 +3,14 @@ import assert from "node:assert/strict";
 import { buildConfigNonInteractive, checkProjectVolumeCollision } from "../src/wizard.js";
 import { parseStack } from "../src/stack.js";
 
+// Pinned at CHAT_OPTIONAL_SINCE (not 1.0.0): this is the shared fixture for
+// every buildConfigNonInteractive test in this file, and supportsOptionalChat
+// gates chat's default on the stack version. A pre-1.1.0 stack forces chat
+// permanently on (see wizard.ts) regardless of CORTEX_ENABLE_CHAT, which is
+// correct there but would starve every test below that expects the default-off
+// behaviour. No test here asserts the literal version string itself.
 const stack = parseStack({
-  stack: "1.0.0",
+  stack: "1.1.0",
   components: { backend: "1.0.0", frontend: "1.0.0", chat: "1.0.0", neo4j: "5.26-community", caddy: "2-alpine" },
   minInstaller: "1.0.0",
 });
@@ -306,4 +312,47 @@ test("a non-http embedding base URL is reported, and never echoes the key", () =
   }
   assert.match(message, /CORTEX_EMBEDDING_API_BASE="ftp:\/\/nope"/);
   assert.ok(!message.includes("venice-secret"), "the error must not disclose the key");
+});
+
+test("chat is off unless CORTEX_ENABLE_CHAT is exactly true", () => {
+  assert.equal(buildConfigNonInteractive(MINIMAL, stack, "/tmp/c").chat, false);
+  for (const v of ["false", "1", "yes", "TRUE", ""]) {
+    assert.equal(
+      buildConfigNonInteractive({ ...MINIMAL, CORTEX_ENABLE_CHAT: v }, stack, "/tmp/c").chat,
+      false,
+      `CORTEX_ENABLE_CHAT=${JSON.stringify(v)} must not enable chat`
+    );
+  }
+  assert.equal(
+    buildConfigNonInteractive({ ...MINIMAL, CORTEX_ENABLE_CHAT: "true" }, stack, "/tmp/c").chat,
+    true
+  );
+});
+
+test("domain mode without chat needs no chat domain", () => {
+  const cfg = buildConfigNonInteractive(
+    { ...MINIMAL, CORTEX_MODE: "domain", CORTEX_APP_DOMAIN: "a.example.com", CORTEX_ACME_EMAIL: "o@example.com" },
+    stack,
+    "/tmp/c"
+  );
+  assert.equal(cfg.chat, false);
+  assert.equal(cfg.domains?.chat, undefined);
+});
+
+test("domain mode with chat still requires a chat domain", () => {
+  assert.throws(
+    () =>
+      buildConfigNonInteractive(
+        {
+          ...MINIMAL,
+          CORTEX_MODE: "domain",
+          CORTEX_ENABLE_CHAT: "true",
+          CORTEX_APP_DOMAIN: "a.example.com",
+          CORTEX_ACME_EMAIL: "o@example.com",
+        },
+        stack,
+        "/tmp/c"
+      ),
+    /CORTEX_CHAT_DOMAIN/
+  );
 });

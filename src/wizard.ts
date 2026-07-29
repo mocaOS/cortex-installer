@@ -5,7 +5,7 @@ import { generateSecrets, validateSecret, type GeneratedSecrets } from "./secret
 import { listModels, probeChat, probeEmbedding } from "./validate.js";
 import { checkPort, probePort, existingProjectVolumes } from "./preflight.js";
 import type { InstallConfig } from "./env.js";
-import type { Stack } from "./stack.js";
+import { CHAT_OPTIONAL_SINCE, supportsOptionalChat, type Stack } from "./stack.js";
 
 const DEFAULT_PORTS = { app: 3000, chat: 3001, api: 8000, neo4jHttp: 7474, neo4jBolt: 7687 };
 
@@ -59,6 +59,11 @@ export function buildConfigNonInteractive(
     throw new Error(`CORTEX_MODE must be "localhost" or "domain", got "${mode}"`);
   }
 
+  // Opt-in, and only on an exact "true" — same shape as CORTEX_ERROR_REPORTING.
+  // On a stack that predates the profile, chat runs regardless of what we write,
+  // so report it as installed rather than claiming it is off.
+  const chat = supportsOptionalChat(stack) ? env.CORTEX_ENABLE_CHAT === "true" : true;
+
   const missing: string[] = [];
   const invalid: string[] = [];
   const need = (k: string): string => {
@@ -110,10 +115,11 @@ export function buildConfigNonInteractive(
 
   let domains: InstallConfig["domains"];
   if (mode === "domain") {
-    const app = need("CORTEX_APP_DOMAIN");
-    const chat = need("CORTEX_CHAT_DOMAIN");
-    const acmeEmail = need("CORTEX_ACME_EMAIL");
-    domains = { app, chat, acmeEmail };
+    domains = {
+      app: need("CORTEX_APP_DOMAIN"),
+      chat: chat ? need("CORTEX_CHAT_DOMAIN") : undefined,
+      acmeEmail: need("CORTEX_ACME_EMAIL"),
+    };
   }
 
   /**
@@ -198,6 +204,7 @@ export function buildConfigNonInteractive(
 
   return {
     mode,
+    chat,
     dir,
     projectName: env.CORTEX_PROJECT_NAME ?? "cortex",
     stack,
@@ -271,6 +278,29 @@ export async function runWizard(opts: { stack: Stack; dir: string }): Promise<In
   })) as InstallConfig["mode"];
   if (p.isCancel(mode)) bail("Cancelled.");
 
+  /**
+   * Cortex Chat is a separate front end and entirely optional — nothing in the
+   * backend or frontend references it. Default off: someone who wants a
+   * knowledge base should not have to opt out of a second web app.
+   *
+   * Asked here, before the domain questions, because chat needs its own domain
+   * and prompting for one we will never use is worse than not asking.
+   */
+  let chat = true;
+  if (supportsOptionalChat(opts.stack)) {
+    const want = await p.confirm({
+      message: "Also install Cortex Chat? (a separate chat front end)",
+      initialValue: false,
+    });
+    if (p.isCancel(want)) bail("Cancelled.");
+    chat = Boolean(want);
+  } else {
+    p.log.info(
+      `Cortex Chat is always installed on stack ${opts.stack.stack}; it became ` +
+        `optional in ${CHAT_OPTIONAL_SINCE}.`
+    );
+  }
+
   let domains: InstallConfig["domains"];
   if (mode === "domain") {
     const app = await p.text({
@@ -279,23 +309,27 @@ export async function runWizard(opts: { stack: Stack; dir: string }): Promise<In
       validate: (v) => (v && v.includes(".") ? undefined : "Enter a fully-qualified domain"),
     });
     if (p.isCancel(app)) bail("Cancelled.");
-    const chat = await p.text({
-      message: "Domain for Cortex Chat",
-      placeholder: "chat.example.com",
-      validate: (v) => (v && v.includes(".") ? undefined : "Enter a fully-qualified domain"),
-    });
-    if (p.isCancel(chat)) bail("Cancelled.");
+    let chatDomain: string | undefined;
+    if (chat) {
+      const entered = await p.text({
+        message: "Domain for Cortex Chat",
+        placeholder: "chat.example.com",
+        validate: (v) => (v && v.includes(".") ? undefined : "Enter a fully-qualified domain"),
+      });
+      if (p.isCancel(entered)) bail("Cancelled.");
+      chatDomain = String(entered);
+    }
     const acmeEmail = await p.text({
       message: "Email for Let's Encrypt",
       validate: (v) => (v && v.includes("@") ? undefined : "Enter an email address"),
     });
     if (p.isCancel(acmeEmail)) bail("Cancelled.");
-    domains = { app: String(app), chat: String(chat), acmeEmail: String(acmeEmail) };
+    domains = { app: String(app), chat: chatDomain, acmeEmail: String(acmeEmail) };
 
     // Spec: resolve each domain and warn. Let's Encrypt validates over HTTP, so
     // a domain that does not resolve at all cannot possibly get a certificate —
     // catching it here beats a Caddy crash-loop after the images are pulled.
-    for (const host of [domains.app, domains.chat]) {
+    for (const host of [domains.app, domains.chat].filter((h): h is string => Boolean(h))) {
       try {
         const addrs = await resolve4(host);
         p.log.success(`${host} resolves to ${addrs.join(", ")}`);
@@ -632,19 +666,24 @@ export async function runWizard(opts: { stack: Stack; dir: string }): Promise<In
       visionModel: String(vm) || undefined,
     };
 
-    const wantSmtp = await p.confirm({ message: "Configure SMTP for chat password reset?", initialValue: false });
-    if (p.isCancel(wantSmtp)) bail("Cancelled.");
-    if (wantSmtp) {
-      const host = await p.text({ message: "SMTP host", validate: (v) => (v ? undefined : "Required") });
-      if (p.isCancel(host)) bail("Cancelled.");
-      const from = await p.text({ message: "From address", validate: (v) => (v?.includes("@") ? undefined : "Required") });
-      if (p.isCancel(from)) bail("Cancelled.");
-      smtp = { host: String(host), port: 587, secure: false, from: String(from) };
+    // SMTP configures chat's password-reset mail and nothing else, so it is
+    // only worth asking about when chat is installed.
+    if (chat) {
+      const wantSmtp = await p.confirm({ message: "Configure SMTP for chat password reset?", initialValue: false });
+      if (p.isCancel(wantSmtp)) bail("Cancelled.");
+      if (wantSmtp) {
+        const host = await p.text({ message: "SMTP host", validate: (v) => (v ? undefined : "Required") });
+        if (p.isCancel(host)) bail("Cancelled.");
+        const from = await p.text({ message: "From address", validate: (v) => (v?.includes("@") ? undefined : "Required") });
+        if (p.isCancel(from)) bail("Cancelled.");
+        smtp = { host: String(host), port: 587, secure: false, from: String(from) };
+      }
     }
   }
 
   return {
     mode,
+    chat,
     dir: opts.dir,
     projectName,
     stack: opts.stack,

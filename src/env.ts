@@ -54,8 +54,11 @@ export interface InstallConfig {
     embeddingBaseUrl?: string;
     embeddingApiKey?: string;
   };
+  /** Whether Cortex Chat is part of this install. Off by default. */
+  chat: boolean;
   ports: { app: number; chat: number; api: number; neo4jHttp: number; neo4jBolt: number };
-  domains?: { app: string; chat: string; acmeEmail: string };
+  /** `chat` is absent when chat is not installed — there is no chat domain then. */
+  domains?: { app: string; chat?: string; acmeEmail: string };
   smtp?: { host: string; port: number; user?: string; pass?: string; secure: boolean; from: string };
   errorReporting: boolean;
   advanced?: {
@@ -147,7 +150,13 @@ export function renderEnv(cfg: InstallConfig): string {
     section("Public domain mode");
     L.push("# Both domains must already have A records pointing at this host.");
     put("APP_DOMAIN", d.app);
-    put("CHAT_DOMAIN", d.chat);
+    // `d.chat` is `string | undefined` now that chat is optional (see
+    // InstallConfig). The renderer does not yet gate its domain-mode output on
+    // `cfg.chat` — that belongs to the task that wires the profile through this
+    // file — so this narrow fallback only keeps `put` (string | number) happy
+    // for chat-off installs; it is not a claim that the output below is correct
+    // for that case yet.
+    put("CHAT_DOMAIN", d.chat ?? "");
     put("ACME_EMAIL", d.acmeEmail);
     put("CHAT_BASE_URL", `https://${d.chat}`);
     put("CORS_ALLOWED_ORIGINS", `https://${d.app},https://${d.chat}`);

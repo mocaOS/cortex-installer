@@ -30,6 +30,7 @@ function base(over: Partial<InstallConfig> = {}): InstallConfig {
       embeddingDimension: 1536,
       embeddingSendDimensions: true,
     },
+    chat: false,
     ports: { app: 3000, chat: 3001, api: 8000, neo4jHttp: 7474, neo4jBolt: 7687 },
     errorReporting: false,
     ...over,

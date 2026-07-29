@@ -11,7 +11,12 @@ export interface InstallState {
   dir: string;
   installedAt: string;
   providerId: string;
-  domains?: { app: string; chat: string; acmeEmail: string };
+  /**
+   * Whether chat is installed. Absent on installs that predate the option —
+   * those were always running chat, which is what `update` back-fills.
+   */
+  chat?: boolean;
+  domains?: { app: string; chat?: string; acmeEmail: string };
   ports: { app: number; chat: number; api: number; neo4jHttp: number; neo4jBolt: number };
   /** Kept so `update` can roll back to the previous pins. */
   previous?: { stack: string; components: Stack["components"] };
