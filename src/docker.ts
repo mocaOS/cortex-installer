@@ -172,6 +172,30 @@ export async function ps(dir: string): Promise<ServiceStatus[]> {
   return parseHealth(result.stdout);
 }
 
+/**
+ * Validates the .env + compose files on disk exactly the way `pull`/`up` are
+ * about to read them — without connecting to anything. `config -q` only
+ * parses and interpolates, then exits non-zero on any failure.
+ *
+ * This is the generic backstop `update` runs right after rewriting .env (see
+ * commands/update.ts): three Criticals in this feature's own review came from
+ * this installer's COMPOSE_PROFILES editing disagreeing with Compose's real
+ * dotenv parser (quoting, inline comments, and which of two duplicate lines
+ * wins — see ensureChatProfile's doc comment in update.ts for all three). That
+ * case space is unbounded, so rather than assume the last gap was found, this
+ * validates the actual combination Compose will see and lets the caller
+ * restore the previous .env on failure instead of leaving a half-written
+ * directory where every subsequent `docker compose` call also fails.
+ */
+export async function validateComposeConfig(dir: string): Promise<{ ok: boolean; stderr: string }> {
+  try {
+    await run(dir, ["config", "-q"]);
+    return { ok: true, stderr: "" };
+  } catch (err: any) {
+    return { ok: false, stderr: String(err?.stderr ?? err?.message ?? err) };
+  }
+}
+
 export async function execIn(dir: string, service: string, cmd: string[]): Promise<string> {
   const result = await run(dir, ["exec", "-T", service, ...cmd]);
   // Callers show this output to humans, so include both stdout and stderr.

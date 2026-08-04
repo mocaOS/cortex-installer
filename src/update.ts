@@ -97,7 +97,16 @@ function splitProfiles(value: string): string[] {
  * recognized too, not just the unquoted form.
  */
 export function envHasChatProfile(envText: string): boolean {
-  const line = envText.split("\n").find((l) => /^\s*COMPOSE_PROFILES\s*=/.test(l));
+  // findLast, not find: Compose's own dotenv parser is last-wins on a
+  // duplicate key (verified against real `docker compose config --services`
+  // with two COMPOSE_PROFILES lines). Reading the FIRST line instead meant
+  // `chat` then `myextra` made the installer believe chat was on while
+  // Compose ran only myextra (a false "Timed out waiting for health" — see
+  // healthServices), and `myextra` then `chat` made it believe chat was off
+  // while Compose actually ran it (domain mode then installs the app-only
+  // Caddyfile while the chat container keeps serving). See ensureChatProfile
+  // below for the matching findLastIndex fix on the write side.
+  const line = envText.split("\n").findLast((l) => /^\s*COMPOSE_PROFILES\s*=/.test(l));
   return line !== undefined && splitProfiles(line.slice(line.indexOf("=") + 1)).includes("chat");
 }
 
@@ -135,6 +144,37 @@ export function envMentionsChatProfile(envText: string): boolean {
 }
 
 /**
+ * Whether .env sets `CHAT_DOMAIN` to a genuinely non-empty value on an active
+ * (uncommented) line.
+ *
+ * Guards the domain-mode + chat-on combination in `commands/update.ts`:
+ * `caddyTemplateFor` (artifacts.ts) picks `Caddyfile.chat.template` from the
+ * chat flag ALONE, with no awareness of `CHAT_DOMAIN`'s value. That template's
+ * `{$CHAT_DOMAIN}` being empty does not just skip the chat site block — it
+ * makes Caddy refuse to adapt the ENTIRE Caddyfile ("server block without any
+ * key is global configuration, and if used, it must be first"), and Caddy is
+ * the only ingress in domain mode, so the whole site goes down. This used to
+ * be structurally impossible (the compose guard was `${CHAT_DOMAIN:?}`);
+ * relaxing it to `${CHAT_DOMAIN:-}` so chat-off installs could omit it
+ * reopened the same variable for a chat-ON install that never set it.
+ *
+ * Deliberately NOT run through the same quote/comment normalization as
+ * COMPOSE_PROFILES: CHAT_DOMAIN is never a comma list, so the one thing that
+ * matters is whether some active line assigns it visible content once
+ * trimmed. `docker compose config -q` (see validateComposeConfig in
+ * docker.ts, wired into `update` as a generic backstop) is what catches any
+ * remaining disagreement with Compose's own parser — this only has to catch
+ * the overwhelmingly common case: the line is absent entirely, because chat
+ * was never configured here before.
+ */
+export function envHasChatDomain(envText: string): boolean {
+  return envText.split("\n").some((l) => {
+    const m = l.match(/^\s*CHAT_DOMAIN\s*=(.*)$/);
+    return m !== null && m[1].trim().length > 0;
+  });
+}
+
+/**
  * Sets or clears `chat` within .env's `COMPOSE_PROFILES` list, leaving every
  * other line — and every other profile already sharing that line — byte
  * identical.
@@ -168,7 +208,11 @@ export function envMentionsChatProfile(envText: string): boolean {
  */
 export function ensureChatProfile(envText: string, enabled: boolean): string {
   const lines = envText.split("\n");
-  const active = lines.findIndex((l) => /^\s*COMPOSE_PROFILES\s*=/.test(l));
+  // findLastIndex, not findIndex: this must edit the line Compose actually
+  // honors (last-wins on a duplicate key), matching envHasChatProfile's own
+  // findLast fix above — see that function's doc comment for the two verified
+  // failure modes a first-match read produced.
+  const active = lines.findLastIndex((l) => /^\s*COMPOSE_PROFILES\s*=/.test(l));
   const commented = lines.findIndex((l) => /^\s*#\s*COMPOSE_PROFILES\s*=\s*chat\s*$/.test(l));
 
   if (enabled) {

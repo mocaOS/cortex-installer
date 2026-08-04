@@ -1,6 +1,11 @@
 {
   "compilerOptions": {
-    "target": "ES2022",
+    // ES2023, not ES2022: Array.prototype.findLast/findLastIndex (used in
+    // update.ts to match Compose's own last-wins .env parsing — see
+    // envHasChatProfile/ensureChatProfile) are ES2023 lib additions, not new
+    // syntax, so this only widens available type declarations. Node >=20.12
+    // (this package's floor) has supported both at runtime since Node 18.
+    "target": "ES2023",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "outDir": "dist",

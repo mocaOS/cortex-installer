@@ -1,12 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   diffComponents,
   rewriteImagePins,
   ensureChatProfile,
   envHasChatProfile,
   envMentionsChatProfile,
+  envHasChatDomain,
 } from "../src/update.js";
+import { assertChatDomainConfigured, handleComposeGuardFailure } from "../src/commands/update.js";
 
 const from = { backend: "1.0.0", frontend: "1.0.0", chat: "1.0.0", neo4j: "5.26-community", caddy: "2-alpine" };
 
@@ -292,4 +297,136 @@ test("chat#x with no trailing comment still yields the single entry chat#x, not 
   // present instead of getting appended.
   const out = ensureChatProfile('COMPOSE_PROFILES="chat#x"\n', true);
   assert.match(out, /^COMPOSE_PROFILES=chat#x,chat$/m);
+});
+
+// --- Final review Fix 2: first-match vs last-wins. --------------------------
+// Compose's own dotenv parser is last-wins on a duplicate key (verified
+// against real `docker compose config --services` with two COMPOSE_PROFILES
+// lines). Reading the FIRST line instead — the old .find/findIndex — produced
+// two verified-live symptoms: "chat" then "myextra" made the installer believe
+// chat was on while Compose ran only myextra (waitHealthy then spins the full
+// 300s on a container Compose never creates, ending in a false "Timed out");
+// "myextra" then "chat" made the installer believe chat was off while Compose
+// actually ran it (disable no-ops, and in domain mode the app-only Caddyfile
+// is installed while the chat container keeps serving).
+
+test("envHasChatProfile honors the LAST active COMPOSE_PROFILES line (chat first, then the winning line drops it)", () => {
+  const envText = "COMPOSE_PROFILES=chat\nCOMPOSE_PROFILES=myextra\n";
+  assert.equal(envHasChatProfile(envText), false, "myextra is the line Compose actually honors");
+});
+
+test("envHasChatProfile honors the LAST active COMPOSE_PROFILES line (chat second, so it wins)", () => {
+  const envText = "COMPOSE_PROFILES=myextra\nCOMPOSE_PROFILES=chat\n";
+  assert.equal(envHasChatProfile(envText), true, "chat is the line Compose actually honors, not myextra");
+});
+
+test("ensureChatProfile edits the LAST active COMPOSE_PROFILES line on enable, leaving the losing first line untouched", () => {
+  const out = ensureChatProfile("COMPOSE_PROFILES=myextra\nCOMPOSE_PROFILES=debug\n", true);
+  assert.match(out, /^COMPOSE_PROFILES=myextra$/m, "the losing first line must not be touched");
+  assert.match(out, /^COMPOSE_PROFILES=debug,chat$/m, "chat must land on the winning last line");
+});
+
+test("ensureChatProfile edits the LAST active COMPOSE_PROFILES line on disable, leaving the losing first line untouched", () => {
+  const out = ensureChatProfile("COMPOSE_PROFILES=debug\nCOMPOSE_PROFILES=chat,myextra\n", false);
+  assert.match(out, /^COMPOSE_PROFILES=debug$/m, "the losing first line must not be touched");
+  assert.match(out, /^COMPOSE_PROFILES=myextra$/m, "chat must be removed from the winning last line only");
+});
+
+// --- Final review Fix 1: domain mode + chat on must never proceed with an
+// empty CHAT_DOMAIN. --------------------------------------------------------
+// caddyTemplateFor picks Caddyfile.chat.template from the chat flag alone; an
+// empty {$CHAT_DOMAIN} there makes Caddy refuse to adapt the ENTIRE Caddyfile,
+// not just the chat site block, and Caddy is the only ingress in domain mode.
+// This used to be structurally impossible (${CHAT_DOMAIN:?}); these tests pin
+// the replacement guard at the one call site that can reach it silently — an
+// operator who uncomments COMPOSE_PROFILES=chat and nothing else.
+
+test("envHasChatDomain is false for a blank, whitespace-only, commented, or absent CHAT_DOMAIN", () => {
+  assert.equal(envHasChatDomain(""), false);
+  assert.equal(envHasChatDomain("APP_DOMAIN=cortex.example.com\n"), false);
+  assert.equal(envHasChatDomain("CHAT_DOMAIN=\n"), false);
+  assert.equal(envHasChatDomain("CHAT_DOMAIN=   \n"), false);
+  assert.equal(envHasChatDomain("# CHAT_DOMAIN=chat.example.com\n"), false);
+});
+
+test("envHasChatDomain is true once an active line assigns real content", () => {
+  assert.equal(envHasChatDomain("CHAT_DOMAIN=chat.example.com\n"), true);
+});
+
+test("assertChatDomainConfigured aborts when chat resolves on in domain mode with .env holding no CHAT_DOMAIN", () => {
+  // Constructed in a real temp dir, not just an in-memory string, so this is
+  // the same shape an operator's actual .env would be on disk.
+  const dir = mkdtempSync(join(tmpdir(), "chatdomain-"));
+  const envPath = join(dir, ".env");
+  writeFileSync(envPath, "COMPOSE_PROFILES=chat\nAPP_DOMAIN=cortex.example.com\nACME_EMAIL=ops@example.com\n");
+  const envText = readFileSync(envPath, "utf8");
+
+  assert.throws(() => assertChatDomainConfigured(envText, "domain", true), /CHAT_DOMAIN/);
+});
+
+test("assertChatDomainConfigured is silent once CHAT_DOMAIN is set", () => {
+  const dir = mkdtempSync(join(tmpdir(), "chatdomain-"));
+  const envPath = join(dir, ".env");
+  writeFileSync(
+    envPath,
+    "COMPOSE_PROFILES=chat\nAPP_DOMAIN=cortex.example.com\nACME_EMAIL=ops@example.com\nCHAT_DOMAIN=chat.example.com\n"
+  );
+  const envText = readFileSync(envPath, "utf8");
+
+  assert.doesNotThrow(() => assertChatDomainConfigured(envText, "domain", true));
+});
+
+test("assertChatDomainConfigured is silent when chat is off, regardless of CHAT_DOMAIN", () => {
+  assert.doesNotThrow(() => assertChatDomainConfigured("APP_DOMAIN=cortex.example.com\n", "domain", false));
+});
+
+test("assertChatDomainConfigured is silent in localhost mode, regardless of CHAT_DOMAIN", () => {
+  assert.doesNotThrow(() => assertChatDomainConfigured("COMPOSE_PROFILES=chat\n", "localhost", true));
+});
+
+// --- Final review Fix 6: a future parser gap must abort safely, not brick the
+// install directory. ---------------------------------------------------------
+// Three Criticals in this feature's own review came from this installer's
+// COMPOSE_PROFILES editing disagreeing with Compose's real dotenv parser. The
+// case space is unbounded, so `update` validates the file it just wrote with
+// `docker compose config -q` and restores the pre-write .env on failure —
+// handleComposeGuardFailure is that restore step. These tests cover the
+// restore itself, not the live `docker compose config` call (which the
+// installer's own test suite otherwise avoids invoking for real — see
+// selfhost/verify-contract.sh in the stack repo for that live coverage).
+
+test("handleComposeGuardFailure restores the pre-write .env to disk before aborting", () => {
+  const dir = mkdtempSync(join(tmpdir(), "guard-"));
+  const envPath = join(dir, ".env");
+  const badText = 'COMPOSE_PROFILES="chat,myextra",chat\n'; // the exact shape Fix round 1 found unparseable
+  const goodText = "COMPOSE_PROFILES=chat,myextra\nNEO4J_PASSWORD=s3cret\n";
+  writeFileSync(envPath, badText); // simulates the write `update` just made
+
+  assert.throws(() => handleComposeGuardFailure(envPath, goodText, 'unexpected character "," in variable name'));
+  assert.equal(readFileSync(envPath, "utf8"), goodText, "the previous .env must be restored to disk, byte for byte");
+});
+
+test("handleComposeGuardFailure's error names the operator's own COMPOSE_PROFILES line and Compose's stderr", () => {
+  const dir = mkdtempSync(join(tmpdir(), "guard-"));
+  const envPath = join(dir, ".env");
+  writeFileSync(envPath, "anything\n");
+  const envBefore = "NEO4J_PASSWORD=s3cret\nCOMPOSE_PROFILES=chat,myextra\n";
+
+  assert.throws(() => handleComposeGuardFailure(envPath, envBefore, "some compose stderr"), (err: unknown) => {
+    const msg = (err as Error).message;
+    return msg.includes("COMPOSE_PROFILES=chat,myextra") && msg.includes("some compose stderr");
+  });
+});
+
+test("handleComposeGuardFailure's error omits the quoted-line section when .env never had a COMPOSE_PROFILES line", () => {
+  // The generic "this usually means COMPOSE_PROFILES editing disagreed..."
+  // sentence always mentions the word — what must be absent when there is no
+  // line to show is the "Your COMPOSE_PROFILES line:" quoting section itself.
+  const dir = mkdtempSync(join(tmpdir(), "guard-"));
+  const envPath = join(dir, ".env");
+  writeFileSync(envPath, "anything\n");
+
+  assert.throws(() => handleComposeGuardFailure(envPath, "NEO4J_PASSWORD=s3cret\n", "some compose stderr"), (err: unknown) => {
+    return !(err as Error).message.includes("Your COMPOSE_PROFILES line");
+  });
 });
