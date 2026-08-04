@@ -46,8 +46,11 @@ export function rewriteImagePins(envText: string, components: Components): strin
 }
 
 /**
- * Normalizes a raw COMPOSE_PROFILES value the way Compose's own .env parser
- * does, so membership checks here agree with what Compose actually sees.
+ * Normalizes a raw single-value .env assignment the way Compose's own .env
+ * parser does, so checks here agree with what Compose actually sees. Shared
+ * by two call sites: `splitProfiles` below (COMPOSE_PROFILES, a comma list)
+ * and `envHasChatDomain` (CHAT_DOMAIN, a scalar) — this is the value-level
+ * normalization common to both; only the comma-splitting is profile-specific.
  *
  * A value wrapped in quotes (single or double) is taken literally up to its
  * CLOSING quote — quotes stripped, nothing else touched, and in particular a
@@ -62,8 +65,15 @@ export function rewriteImagePins(envText: string, components: Components): strin
  * appended a second `chat` outside the quotes again. An unquoted value (no
  * leading quote at all) has a trailing `#…` comment removed, because that IS
  * how Compose reads it.
+ *
+ * A quoted-empty value (`""`, `''`, `"" # note`) normalizes to the empty
+ * string, same as an outright-absent one. That is exactly what
+ * `envHasChatDomain` needs and a bare `.trim().length > 0` on the raw text
+ * does not give: `${CHAT_DOMAIN:-}` makes `CHAT_DOMAIN=""` legal SYNTAX to
+ * Compose, which happily interpolates it to an empty string — still not a
+ * usable domain.
  */
-function normalizeProfilesValue(raw: string): string {
+function normalizeEnvValue(raw: string): string {
   const trimmed = raw.trim();
   const quote = trimmed[0];
   if (quote === '"' || quote === "'") {
@@ -76,7 +86,7 @@ function normalizeProfilesValue(raw: string): string {
 
 /** Splits a COMPOSE_PROFILES value into its comma-separated entries, trimmed and with empty entries dropped. */
 function splitProfiles(value: string): string[] {
-  return normalizeProfilesValue(value)
+  return normalizeEnvValue(value)
     .split(",")
     .map((p) => p.trim())
     .filter(Boolean);
@@ -158,19 +168,25 @@ export function envMentionsChatProfile(envText: string): boolean {
  * relaxing it to `${CHAT_DOMAIN:-}` so chat-off installs could omit it
  * reopened the same variable for a chat-ON install that never set it.
  *
- * Deliberately NOT run through the same quote/comment normalization as
- * COMPOSE_PROFILES: CHAT_DOMAIN is never a comma list, so the one thing that
- * matters is whether some active line assigns it visible content once
- * trimmed. `docker compose config -q` (see validateComposeConfig in
- * docker.ts, wired into `update` as a generic backstop) is what catches any
- * remaining disagreement with Compose's own parser — this only has to catch
- * the overwhelmingly common case: the line is absent entirely, because chat
- * was never configured here before.
+ * Goes through the SAME quote/comment normalization as COMPOSE_PROFILES
+ * (`normalizeEnvValue`) before checking emptiness. An earlier version of this
+ * function tested `.trim().length > 0` on the raw text after `=` directly, so
+ * `CHAT_DOMAIN=""`, `CHAT_DOMAIN=''` and `CHAT_DOMAIN="" # placeholder` all
+ * read as present — the raw text is non-empty even though Compose interpolates
+ * every one of them to an empty string. `docker compose config -q`
+ * (`validateComposeConfig`, docker.ts — wired into `update` as a generic
+ * backstop) does NOT catch this: it backstops a PARSER disagreement, and
+ * `${CHAT_DOMAIN:-}` makes an empty value legal SYNTAX, so `config -q` exits 0
+ * on it regardless. The divergence this function closes is about emptiness,
+ * not syntax, which is exactly why it has to be checked here. Reusing the
+ * shared normalization (rather than a narrower ad hoc check) is also what
+ * keeps a genuinely-populated but quoted value — `CHAT_DOMAIN="chat.example.com"`
+ * — correctly counted as present.
  */
 export function envHasChatDomain(envText: string): boolean {
   return envText.split("\n").some((l) => {
     const m = l.match(/^\s*CHAT_DOMAIN\s*=(.*)$/);
-    return m !== null && m[1].trim().length > 0;
+    return m !== null && normalizeEnvValue(m[1]).length > 0;
   });
 }
 
@@ -190,7 +206,7 @@ export function envHasChatDomain(envText: string): boolean {
  *
  * The list is read through `splitProfiles`, which normalizes quoting and
  * inline comments the way Compose's own parser does — see
- * `normalizeProfilesValue`. Whenever an active line is actually rewritten, the
+ * `normalizeEnvValue`. Whenever an active line is actually rewritten, the
  * output is always the plain unquoted form the installer itself writes: this
  * function does not try to preserve an operator's quoting or inline comment,
  * because doing so is what let a quoted or commented value disagree with what

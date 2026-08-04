@@ -53,6 +53,39 @@ export function assertChatDomainConfigured(
 }
 
 /**
+ * Reads .env with a friendly, actionable message instead of a raw
+ * ENOENT/EACCES/EISDIR when it is missing or unreadable.
+ *
+ * `resolveInstall` above already guarantees `dir` has a readable
+ * `cortex.json` — that is how `run` found this install at all — so reaching
+ * here with no working .env means a half-broken install: deleted, permissions
+ * mangled, or `dir` pointing somewhere odd. `update` needs .env open in
+ * memory before `assertChatDomainConfigured` can even run (see the call site
+ * below), and hoisting that read to the very top of `run` — so the domain
+ * guard can fail fast, before any network call or prompt — means a half-broken
+ * install no longer reaches the "Already on X. Nothing to do." early-out
+ * `diffComponents` used to be able to give it; instead it hit a bare
+ * `readFileSync` throw here first. This restores an actionable message in its
+ * place. Unlike `readEffectiveChat` (chat.ts), which falls back to state
+ * because `start` can still usefully try to bring a half-broken install up,
+ * `update` genuinely cannot proceed without a real .env to repin, so this
+ * throws rather than substituting anything.
+ */
+export function readEnvOrThrow(envPath: string, dir: string): string {
+  try {
+    return readFileSync(envPath, "utf8");
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    throw new Error(
+      `${envPath} is missing or unreadable${code ? ` (${code})` : ""}.\n\n` +
+        `${dir} has a cortex.json but no working .env, so \`cortex update\` has nothing to ` +
+        `repin. Restore it by hand before trying again — it is not part of the backup ` +
+        `sidecar's volume export, since it lives on the host, not in a Docker volume.`
+    );
+  }
+}
+
+/**
  * Restores the pre-write .env and aborts when the .env `update` just wrote
  * fails `docker compose config` — see the call site below for why this
  * generic backstop exists.
@@ -79,7 +112,7 @@ export async function run(ctx: { flags: Record<string, string | boolean> }): Pro
   const { dir, state } = resolveInstall(ctx.flags);
 
   const envPath = join(dir, ".env");
-  const envBefore = readFileSync(envPath, "utf8");
+  const envBefore = readEnvOrThrow(envPath, dir);
 
   // effectiveChat (src/chat.ts) is the single reconciliation of cortex.json
   // against .env — see its doc comment for the full rule. Computed up front,

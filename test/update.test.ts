@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -11,7 +11,7 @@ import {
   envMentionsChatProfile,
   envHasChatDomain,
 } from "../src/update.js";
-import { assertChatDomainConfigured, handleComposeGuardFailure } from "../src/commands/update.js";
+import { assertChatDomainConfigured, handleComposeGuardFailure, readEnvOrThrow } from "../src/commands/update.js";
 
 const from = { backend: "1.0.0", frontend: "1.0.0", chat: "1.0.0", neo4j: "5.26-community", caddy: "2-alpine" };
 
@@ -353,6 +353,47 @@ test("envHasChatDomain is true once an active line assigns real content", () => 
   assert.equal(envHasChatDomain("CHAT_DOMAIN=chat.example.com\n"), true);
 });
 
+// --- Residual close-out: a quoted-empty value must not count as present. ---
+// ${CHAT_DOMAIN:-} makes CHAT_DOMAIN="" legal SYNTAX to Compose, which
+// interpolates it to an empty string — docker compose config -q exits 0 on
+// it, so this is the one thing that has to be checked here rather than left
+// to that backstop. The naive `.trim().length > 0` on the raw text read
+// "" (two quote characters) as non-empty and waved the outage through.
+
+test("envHasChatDomain is false for a double-quoted-empty value", () => {
+  assert.equal(envHasChatDomain('CHAT_DOMAIN=""\n'), false);
+});
+
+test("envHasChatDomain is false for a single-quoted-empty value", () => {
+  assert.equal(envHasChatDomain("CHAT_DOMAIN=''\n"), false);
+});
+
+test("envHasChatDomain is false for a quoted-empty value with a trailing comment", () => {
+  assert.equal(envHasChatDomain('CHAT_DOMAIN="" # placeholder\n'), false);
+});
+
+test("envHasChatDomain is true for a genuinely populated value that happens to be quoted", () => {
+  // The fix must not overcorrect: a real domain wrapped in quotes (a
+  // perfectly normal hand-edit) still has to count as present.
+  assert.equal(envHasChatDomain('CHAT_DOMAIN="chat.example.com"\n'), true);
+  assert.equal(envHasChatDomain("CHAT_DOMAIN='chat.example.com'\n"), true);
+  assert.equal(envHasChatDomain('CHAT_DOMAIN="chat.example.com" # note\n'), true);
+});
+
+test("assertChatDomainConfigured aborts on a quoted-empty CHAT_DOMAIN, not just an absent one", () => {
+  // This is the exact outage Fix 1 exists to prevent, reopened by a
+  // quoted-empty value: caddy validate on the chat template fails with the
+  // same "server block without any key" error once CHAT_DOMAIN interpolates
+  // to "". assertChatDomainConfigured must abort BEFORE that, same as for an
+  // absent CHAT_DOMAIN.
+  const dir = mkdtempSync(join(tmpdir(), "chatdomain-"));
+  const envPath = join(dir, ".env");
+  writeFileSync(envPath, 'COMPOSE_PROFILES=chat\nAPP_DOMAIN=cortex.example.com\nCHAT_DOMAIN=""\n');
+  const envText = readFileSync(envPath, "utf8");
+
+  assert.throws(() => assertChatDomainConfigured(envText, "domain", true), /CHAT_DOMAIN/);
+});
+
 test("assertChatDomainConfigured aborts when chat resolves on in domain mode with .env holding no CHAT_DOMAIN", () => {
   // Constructed in a real temp dir, not just an in-memory string, so this is
   // the same shape an operator's actual .env would be on disk.
@@ -429,4 +470,46 @@ test("handleComposeGuardFailure's error omits the quoted-line section when .env 
   assert.throws(() => handleComposeGuardFailure(envPath, "NEO4J_PASSWORD=s3cret\n", "some compose stderr"), (err: unknown) => {
     return !(err as Error).message.includes("Your COMPOSE_PROFILES line");
   });
+});
+
+// --- Residual close-out: a missing/unreadable .env must not crash `update`
+// with a raw ENOENT before the first friendly line. --------------------------
+// Hoisting the .env read to the top of run() (for assertChatDomainConfigured)
+// means a half-broken install — cortex.json present, .env deleted or
+// unreadable — no longer reaches diffComponents' "Already on X. Nothing to
+// do." early-out; it used to be able to get there without ever opening .env.
+// readEnvOrThrow gives a named, actionable message instead of a bare
+// `readFileSync` stack trace.
+
+test("readEnvOrThrow throws a friendly, actionable message when .env does not exist at all", () => {
+  const dir = mkdtempSync(join(tmpdir(), "noenv-"));
+  const envPath = join(dir, ".env");
+
+  assert.throws(() => readEnvOrThrow(envPath, dir), (err: unknown) => {
+    const msg = (err as Error).message;
+    return msg.includes(envPath) && msg.includes(dir) && !msg.includes("ENOENT: no such file");
+  });
+});
+
+test("readEnvOrThrow throws a friendly message when .env exists but cannot be read as a file (EISDIR)", () => {
+  // A directory in .env's place makes readFileSync throw EISDIR —
+  // deterministic on every platform, unlike chmod 0o000 (a process running as
+  // root simply ignores that) — same technique test/chat.test.ts uses for
+  // readEffectiveChat's equivalent fallback.
+  const dir = mkdtempSync(join(tmpdir(), "noenv-"));
+  const envPath = join(dir, ".env");
+  mkdirSync(envPath);
+
+  assert.throws(() => readEnvOrThrow(envPath, dir), (err: unknown) => {
+    const msg = (err as Error).message;
+    return msg.includes(envPath) && msg.includes("EISDIR");
+  });
+});
+
+test("readEnvOrThrow returns the file's contents unchanged when .env is present and readable", () => {
+  const dir = mkdtempSync(join(tmpdir(), "noenv-"));
+  const envPath = join(dir, ".env");
+  writeFileSync(envPath, "NEO4J_PASSWORD=s3cret\n");
+
+  assert.equal(readEnvOrThrow(envPath, dir), "NEO4J_PASSWORD=s3cret\n");
 });
