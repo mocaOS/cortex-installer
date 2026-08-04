@@ -130,7 +130,7 @@ export function renderEnv(cfg: InstallConfig): string {
 
   if (cfg.chat) {
     L.push("# Cortex Chat is installed. Remove this line and run `npx @mocaos/cortex restart`");
-    L.push("# to drop it (installer >= 1.2.0: `down` names the chat profile so it really does");
+    L.push("# to drop it (installer >= 1.2.2: `down` names the chat profile so it really does");
     L.push("# remove the container — plain `compose down` is profile-filtered and does not).");
     put("COMPOSE_PROFILES", "chat");
   } else if (cfg.mode === "domain") {
