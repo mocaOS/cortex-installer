@@ -237,6 +237,20 @@ test("chat off in domain mode writes no chat domain and no chat CORS origin", ()
   assert.match(env, /^CORS_ALLOWED_ORIGINS=https:\/\/a\.example\.com$/m);
 });
 
+test("domain + chat-off still writes APP_DOMAIN and ACME_EMAIL", () => {
+  // Both put() calls sit unconditionally in the "Public domain mode" section,
+  // ABOVE the `if (cfg.chat && d.chat)` block that adds CHAT_DOMAIN et al. —
+  // this pins that placement. Moving them under `if (cfg.chat)` would pass
+  // every other test in this file (none of them assert these two vars in the
+  // chat-off domain combination specifically) and break every chat-off domain
+  // install: APP_DOMAIN and ACME_EMAIL are read by the caddy overlay's
+  // `${VAR:?}` guards regardless of whether chat is installed.
+  const cfg = base({ chat: false, mode: "domain", domains: { app: "a.example.com", acmeEmail: "o@example.com" } });
+  const e = parse(renderEnv(cfg));
+  assert.equal(e.APP_DOMAIN, "a.example.com");
+  assert.equal(e.ACME_EMAIL, "o@example.com");
+});
+
 test("chat on in domain mode writes both origins", () => {
   const env = renderEnv(
     base({
