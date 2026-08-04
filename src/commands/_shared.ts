@@ -26,7 +26,13 @@ export function resolveInstall(flags: Record<string, string | boolean>): {
 export function serviceUrl(state: InstallState, service: string): string | null {
   if (state.mode === "domain") {
     if (service === "frontend") return `https://${state.domains!.app}`;
-    if (service === "chat") return `https://${state.domains!.chat}`;
+    // Guarded, unlike `frontend` above: state.chat can be true while
+    // state.domains.chat was never collected — `update` reconciles chat on
+    // from a bare .env edit (see effectiveChat in chat.ts) without ever
+    // learning a domain for it. That produced `https://undefined` here, the
+    // same defect renderEnv had (env.ts) and was fixed there; this second
+    // site was never swept. Omit the URL instead of printing `undefined`.
+    if (service === "chat") return state.domains?.chat ? `https://${state.domains.chat}` : null;
     return null;
   }
   if (service === "frontend") return `http://localhost:${state.ports.app}`;

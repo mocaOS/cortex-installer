@@ -45,6 +45,21 @@ test("services with no user-facing URL return null", () => {
   assert.equal(serviceUrl(state, "backup"), null);
 });
 
+test("domain mode with chat resolved on but no collected chat domain omits the URL instead of printing https://undefined", () => {
+  // `update` can reconcile state.chat to true from a bare .env edit (see
+  // effectiveChat in chat.ts) without ever learning a domain for it — the
+  // wizard only ever collects domains.chat when chat was already on at
+  // install time. This is the identical https://undefined defect renderEnv
+  // had (env.ts) and was fixed there; this second call site was never swept.
+  const d: InstallState = {
+    ...state,
+    mode: "domain",
+    chat: true,
+    domains: { app: "c.example.com", acmeEmail: "a@example.com" }, // no chat domain collected
+  };
+  assert.equal(serviceUrl(d, "chat"), null);
+});
+
 test("redactSecret replaces every occurrence of the secret with ***", () => {
   const fakeKey = "sk-test-FAKESECRET000000000000000000";
   const body = `error: invalid request, saw header Authorization: Bearer ${fakeKey} (echoed twice: ${fakeKey})`;
